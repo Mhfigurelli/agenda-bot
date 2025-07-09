@@ -80,7 +80,8 @@ Responda em português do Brasil. Separe o texto do JSON com \`---\`.
   res.type('text/xml').send(twiml.toString());
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Bot rodando na porta ${PORT}`);
+const port = process.env.PORT;
+app.listen(port, () => {
+  console.log(`🟢 Servidor rodando na porta ${port}`);
 });
+
