@@ -109,4 +109,5 @@ async function agendarConsultaGoogleCalendar(dados) {
     calendarId: process.env.CALENDAR_ID,
     resource: evento
 });
+}
 
