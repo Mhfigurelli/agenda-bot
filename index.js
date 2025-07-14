@@ -1,6 +1,8 @@
 const express = require('express');
 const axios = require('axios');
 const { MessagingResponse } = require('twilio').twiml;
+const { google } = require('googleapis');
+const fs = require('fs');
 require('dotenv').config();
 
 const app = express();
@@ -66,6 +68,20 @@ Responda em português do Brasil. Separe o texto do JSON com \`---\`.
     try {
       dadosJson = JSON.parse(partes[1]);
       console.log('📦 JSON:', dadosJson);
+
+      // ✅ Verifica se o JSON está completo e agenda
+      if (
+        dadosJson.nome &&
+        dadosJson.tipo_atendimento &&
+        dadosJson.data &&
+        dadosJson.horario
+      ) {
+        await agendarConsultaGoogleCalendar(dadosJson);
+        console.log('✅ Consulta agendada com sucesso!');
+      } else {
+        console.log('⏳ Aguardando mais dados do paciente...');
+      }
+
     } catch (e) {
       console.error('❌ Erro ao interpretar JSON:', e.message);
     }
@@ -80,21 +96,32 @@ Responda em português do Brasil. Separe o texto do JSON com \`---\`.
   res.type('text/xml').send(twiml.toString());
 });
 
-// ✅ Correção aqui: fecha função do listen
 const port = process.env.PORT;
 app.listen(port, () => {
   console.log(`🟢 Servidor rodando na porta ${port}`);
-}); // <-- esta linha faltava!
+});
 
-// Código do Google Calendar (em construção)
-const { google } = require('googleapis');
-const fs = require('fs');
-
+// ✅ Função para agendamento no Google Calendar
 async function agendarConsultaGoogleCalendar(dados) {
   const auth = new google.auth.GoogleAuth({
     keyFile: 'credentials.json',
     scopes: ['https://www.googleapis.com/auth/calendar']
   });
 
-  // implementação virá depois
+  const calendar = google.calendar({ version: 'v3', auth });
+
+  const startDateTime = new Date(`${dados.data}T${dados.horario}:00`);
+  const endDateTime = new Date(startDateTime.getTime() + 30 * 60000); // 30 minutos
+
+  const evento = {
+    summary: `Consulta: ${dados.nome}`,
+    description: `Atendimento: ${dados.tipo_atendimento}${dados.convenio ? ` - Convênio: ${dados.convenio}` : ''}`,
+    start: { dateTime: startDateTime.toISOString(), timeZone: 'America/Sao_Paulo' },
+    end: { dateTime: endDateTime.toISOString(), timeZone: 'America/Sao_Paulo' }
+  };
+
+  await calendar.events.insert({
+    calendarId: process.env.CALENDAR_ID,
+    resource: evento
+  });
 }
