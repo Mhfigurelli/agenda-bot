@@ -80,10 +80,13 @@ Responda em português do Brasil. Separe o texto do JSON com \`---\`.
   res.type('text/xml').send(twiml.toString());
 });
 
+// ✅ Correção aqui: fecha função do listen
 const port = process.env.PORT;
 app.listen(port, () => {
   console.log(`🟢 Servidor rodando na porta ${port}`);
+}); // <-- esta linha faltava!
 
+// Código do Google Calendar (em construção)
 const { google } = require('googleapis');
 const fs = require('fs');
 
@@ -93,6 +96,5 @@ async function agendarConsultaGoogleCalendar(dados) {
     scopes: ['https://www.googleapis.com/auth/calendar']
   });
 
-  
+  // implementação virá depois
 }
-
