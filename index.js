@@ -93,21 +93,6 @@ async function agendarConsultaGoogleCalendar(dados) {
     scopes: ['https://www.googleapis.com/auth/calendar']
   });
 
-  const calendar = google.calendar({ version: 'v3', auth });
-
-  const startDateTime = new Date(`${dados.data}T${dados.horario}:00`);
-  const endDateTime = new Date(startDateTime.getTime() + 30 * 60000); // 30 minutos depois
-
-  const evento = {
-    summary: `Consulta: ${dados.nome}`,
-    description: `Atendimento: ${dados.tipo_atendimento}${dados.convenio ? ` - Convênio: ${dados.convenio}` : ''}`,
-    start: { dateTime: startDateTime.toISOString(), timeZone: 'America/Sao_Paulo' },
-    end: { dateTime: endDateTime.toISOString(), timeZone: 'America/Sao_Paulo' }
-  };
-
-  await calendar.events.insert({
-    calendarId: process.env.CALENDAR_ID,
-    resource: evento
-});
+  
 }
 
