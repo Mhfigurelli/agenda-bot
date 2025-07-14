@@ -1,9 +1,9 @@
 const express = require('express');
 const axios = require('axios');
 const { MessagingResponse } = require('twilio').twiml;
-const { google } = require('googleapis');
-const fs = require('fs');
 require('dotenv').config();
+
+const { google } = require('googleapis');
 
 const app = express();
 app.use(express.urlencoded({ extended: false }));
@@ -32,7 +32,9 @@ Ofereça no máximo duas opções de horário para cada dia.
 
 No final da resposta, retorne SEMPRE o JSON consolidado com esses dados. Mesmo que nem todos os dados tenham sido preenchidos ainda, mantenha o JSON com as chaves e valores \`null\`.
 
-Responda em português do Brasil. Separe o texto do JSON com \`---\`.
+**Não utilize blocos de código Markdown. Não inclua crases (\`) ao redor do JSON.**
+
+Separe a mensagem e o JSON com \`---\`.
 `
       }
     ];
@@ -66,20 +68,18 @@ Responda em português do Brasil. Separe o texto do JSON com \`---\`.
     mensagemPaciente = partes[0].trim();
 
     try {
-      dadosJson = JSON.parse(partes[1]);
+      const jsonStr = partes[1]
+        .replace(/```json/, '')
+        .replace(/```/, '')
+        .replace(/`/g, '')
+        .trim();
+
+      dadosJson = JSON.parse(jsonStr);
       console.log('📦 JSON:', dadosJson);
 
-      // ✅ Verifica se o JSON está completo e agenda
-      if (
-        dadosJson.nome &&
-        dadosJson.tipo_atendimento &&
-        dadosJson.data &&
-        dadosJson.horario
-      ) {
+      // Só agenda se todos os campos necessários estiverem preenchidos
+      if (dadosJson.nome && dadosJson.data && dadosJson.horario && dadosJson.tipo_atendimento) {
         await agendarConsultaGoogleCalendar(dadosJson);
-        console.log('✅ Consulta agendada com sucesso!');
-      } else {
-        console.log('⏳ Aguardando mais dados do paciente...');
       }
 
     } catch (e) {
@@ -101,7 +101,10 @@ app.listen(port, () => {
   console.log(`🟢 Servidor rodando na porta ${port}`);
 });
 
-// ✅ Função para agendamento no Google Calendar
+
+// ------------------------------
+// Função de agendamento no Google Calendar
+// ------------------------------
 async function agendarConsultaGoogleCalendar(dados) {
   const auth = new google.auth.GoogleAuth({
     keyFile: 'credentials.json',
@@ -111,7 +114,7 @@ async function agendarConsultaGoogleCalendar(dados) {
   const calendar = google.calendar({ version: 'v3', auth });
 
   const startDateTime = new Date(`${dados.data}T${dados.horario}:00`);
-  const endDateTime = new Date(startDateTime.getTime() + 30 * 60000); // 30 minutos
+  const endDateTime = new Date(startDateTime.getTime() + 30 * 60000); // 30 minutos depois
 
   const evento = {
     summary: `Consulta: ${dados.nome}`,
@@ -124,4 +127,6 @@ async function agendarConsultaGoogleCalendar(dados) {
     calendarId: process.env.CALENDAR_ID,
     resource: evento
   });
+
+  console.log('📅 Evento criado com sucesso no Google Calendar');
 }
