@@ -1,9 +1,10 @@
+// index.js
 const express = require('express');
 const axios = require('axios');
 const { MessagingResponse } = require('twilio').twiml;
-require('dotenv').config();
-
 const { google } = require('googleapis');
+const fs = require('fs');
+require('dotenv').config();
 
 const app = express();
 app.use(express.urlencoded({ extended: false }));
@@ -19,6 +20,8 @@ app.post('/whatsapp', async (req, res) => {
       {
         role: 'system',
         content: `
+Hoje é ${new Date().toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' })}.
+
 Você é um atendente virtual da clínica da Dra. Carolina Figurelli, urologista em Porto Alegre, que atende no Medplex Santana – Rua Gomes Jardim, 201 – sala 1602.
 
 Durante a conversa com o paciente, colete:
@@ -28,14 +31,27 @@ Durante a conversa com o paciente, colete:
 - data preferida (formato: 2025-07-05)
 - horário preferido (formato: 14:00)
 
-Ofereça no máximo duas opções de horário para cada dia.
+Importante:
+- Quando o paciente informar todos os dados, **confirme a consulta como agendada** (sem dizer que é pré-agendamento).
+- Evite usar palavras como "em breve", "iremos confirmar", ou "pré-agendada".
+- Seja gentil e direto, sem prometer retorno posterior.
 
-No final da resposta, retorne SEMPRE o JSON consolidado com esses dados. Mesmo que nem todos os dados tenham sido preenchidos ainda, mantenha o JSON com as chaves e valores \`null\`.
+No final da resposta, **retorne SEMPRE o JSON consolidado** com esses dados. Mesmo que nem todos os dados tenham sido preenchidos ainda, mantenha o JSON com as chaves e valores \`null\`.
 
-**Não utilize blocos de código Markdown. Não inclua crases (\`) ao redor do JSON.**
+Formato do JSON:
+\`\`\`json
+{
+  "nome": null,
+  "tipo_atendimento": null,
+  "convenio": null,
+  "data": null,
+  "horario": null
+}
+\`\`\`
 
-Separe a mensagem e o JSON com \`---\`.
-`
+Separe a resposta do paciente e o JSON com três traços: \`---\`.
+Responda em português do Brasil.
+        `
       }
     ];
   }
@@ -69,19 +85,17 @@ Separe a mensagem e o JSON com \`---\`.
 
     try {
       const jsonStr = partes[1]
-        .replace(/```json/, '')
-        .replace(/```/, '')
-        .replace(/`/g, '')
+        .replace(/```json/g, '')
+        .replace(/```/g, '')
         .trim();
 
       dadosJson = JSON.parse(jsonStr);
       console.log('📦 JSON:', dadosJson);
 
-      // Só agenda se todos os campos necessários estiverem preenchidos
-      if (dadosJson.nome && dadosJson.data && dadosJson.horario && dadosJson.tipo_atendimento) {
+      // Se todos os dados estiverem preenchidos, agenda direto
+      if (dadosJson.nome && dadosJson.tipo_atendimento && dadosJson.data && dadosJson.horario) {
         await agendarConsultaGoogleCalendar(dadosJson);
       }
-
     } catch (e) {
       console.error('❌ Erro ao interpretar JSON:', e.message);
     }
@@ -96,15 +110,6 @@ Separe a mensagem e o JSON com \`---\`.
   res.type('text/xml').send(twiml.toString());
 });
 
-const port = process.env.PORT;
-app.listen(port, () => {
-  console.log(`🟢 Servidor rodando na porta ${port}`);
-});
-
-
-// ------------------------------
-// Função de agendamento no Google Calendar
-// ------------------------------
 async function agendarConsultaGoogleCalendar(dados) {
   const auth = new google.auth.GoogleAuth({
     keyFile: 'credentials.json',
@@ -114,7 +119,7 @@ async function agendarConsultaGoogleCalendar(dados) {
   const calendar = google.calendar({ version: 'v3', auth });
 
   const startDateTime = new Date(`${dados.data}T${dados.horario}:00`);
-  const endDateTime = new Date(startDateTime.getTime() + 30 * 60000); // 30 minutos depois
+  const endDateTime = new Date(startDateTime.getTime() + 30 * 60000);
 
   const evento = {
     summary: `Consulta: ${dados.nome}`,
@@ -127,6 +132,9 @@ async function agendarConsultaGoogleCalendar(dados) {
     calendarId: process.env.CALENDAR_ID,
     resource: evento
   });
-
-  console.log('📅 Evento criado com sucesso no Google Calendar');
 }
+
+const port = process.env.PORT;
+app.listen(port, () => {
+  console.log(`🟢 Servidor rodando na porta ${port}`);
+});
