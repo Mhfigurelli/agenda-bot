@@ -1,10 +1,9 @@
-// index.js
 const express = require('express');
 const axios = require('axios');
 const { MessagingResponse } = require('twilio').twiml;
+require('dotenv').config();
 const { google } = require('googleapis');
 const fs = require('fs');
-require('dotenv').config();
 
 const app = express();
 app.use(express.urlencoded({ extended: false }));
@@ -20,8 +19,6 @@ app.post('/whatsapp', async (req, res) => {
       {
         role: 'system',
         content: `
-Hoje é ${new Date().toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' })}.
-
 Você é um atendente virtual da clínica da Dra. Carolina Figurelli, urologista em Porto Alegre, que atende no Medplex Santana – Rua Gomes Jardim, 201 – sala 1602.
 
 Durante a conversa com o paciente, colete:
@@ -31,15 +28,10 @@ Durante a conversa com o paciente, colete:
 - data preferida (formato: 2025-07-05)
 - horário preferido (formato: 14:00)
 
-Importante:
-- Quando o paciente informar todos os dados, **confirme a consulta como agendada** (sem dizer que é pré-agendamento).
-- Evite usar palavras como "em breve", "iremos confirmar", ou "pré-agendada".
-- Seja gentil e direto, sem prometer retorno posterior.
+Ofereça no máximo duas opções de horário para cada dia.
 
-No final da resposta, **retorne SEMPRE o JSON consolidado** com esses dados. Mesmo que nem todos os dados tenham sido preenchidos ainda, mantenha o JSON com as chaves e valores \`null\`.
+No final da resposta, inclua apenas um bloco de código com os dados consolidados em JSON (sem escrever a palavra "json" antes). Use esta estrutura:
 
-Formato do JSON:
-\`\`\`json
 {
   "nome": null,
   "tipo_atendimento": null,
@@ -47,11 +39,9 @@ Formato do JSON:
   "data": null,
   "horario": null
 }
-\`\`\`
 
-Separe a resposta do paciente e o JSON com três traços: \`---\`.
-Responda em português do Brasil.
-        `
+Responda em português do Brasil. Separe o texto do JSON com \`---\`.
+`
       }
     ];
   }
@@ -83,21 +73,18 @@ Responda em português do Brasil.
     const partes = respostaIA.split('---');
     mensagemPaciente = partes[0].trim();
 
-    try {
-      const jsonStr = partes[1]
-        .replace(/```json/g, '')
-        .replace(/```/g, '')
-        .trim();
+    if (partes[1]) {
+      try {
+        dadosJson = JSON.parse(partes[1].trim());
+        console.log('📦 JSON:', dadosJson);
 
-      dadosJson = JSON.parse(jsonStr);
-      console.log('📦 JSON:', dadosJson);
-
-      // Se todos os dados estiverem preenchidos, agenda direto
-      if (dadosJson.nome && dadosJson.tipo_atendimento && dadosJson.data && dadosJson.horario) {
+        console.log('✅ Vai tentar agendar no Google Calendar');
         await agendarConsultaGoogleCalendar(dadosJson);
+      } catch (e) {
+        console.error('❌ Erro ao interpretar JSON:', e.message);
       }
-    } catch (e) {
-      console.error('❌ Erro ao interpretar JSON:', e.message);
+    } else {
+      console.error('❌ JSON não encontrado na resposta da IA');
     }
 
   } catch (err) {
@@ -110,6 +97,9 @@ Responda em português do Brasil.
   res.type('text/xml').send(twiml.toString());
 });
 
+// --------------------------------
+// Google Calendar Function
+// --------------------------------
 async function agendarConsultaGoogleCalendar(dados) {
   const auth = new google.auth.GoogleAuth({
     keyFile: 'credentials.json',
@@ -132,9 +122,11 @@ async function agendarConsultaGoogleCalendar(dados) {
     calendarId: process.env.CALENDAR_ID,
     resource: evento
   });
+
+  console.log('✅ Consulta adicionada ao Google Calendar!');
 }
 
-const port = process.env.PORT;
+const port = process.env.PORT || 3000;
 app.listen(port, () => {
   console.log(`🟢 Servidor rodando na porta ${port}`);
 });
