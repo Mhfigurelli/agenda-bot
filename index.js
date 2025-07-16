@@ -1,9 +1,8 @@
 const express = require('express');
 const axios = require('axios');
+const { google } = require('googleapis');
 const { MessagingResponse } = require('twilio').twiml;
 require('dotenv').config();
-const { google } = require('googleapis');
-const fs = require('fs');
 
 const app = express();
 app.use(express.urlencoded({ extended: false }));
@@ -15,11 +14,15 @@ app.post('/whatsapp', async (req, res) => {
   const msg = req.body && req.body.Body ? req.body.Body.trim() : '';
 
   if (!historicoConversas[telefone]) {
+    const dataAtual = new Date().toLocaleDateString('pt-BR');
+
     historicoConversas[telefone] = [
       {
         role: 'system',
         content: `
 Você é um atendente virtual da clínica da Dra. Carolina Figurelli, urologista em Porto Alegre, que atende no Medplex Santana – Rua Gomes Jardim, 201 – sala 1602.
+
+Hoje é: ${dataAtual}. Use essa data como referência para interpretar datas relativas como "próxima quarta".
 
 Durante a conversa com o paciente, colete:
 - nome completo
@@ -28,17 +31,13 @@ Durante a conversa com o paciente, colete:
 - data preferida (formato: 2025-07-05)
 - horário preferido (formato: 14:00)
 
+Se o paciente informar um convênio (ex: Unimed, Bradesco, etc), o campo "tipo_atendimento" deve ser "convênio", e o nome do convênio deve ir no campo "convenio".
+
+Não use "particular Unimed" nem confunda convênio com atendimento particular.
+
 Ofereça no máximo duas opções de horário para cada dia.
 
-No final da resposta, inclua apenas um bloco de código com os dados consolidados em JSON (sem escrever a palavra "json" antes). Use esta estrutura:
-
-{
-  "nome": null,
-  "tipo_atendimento": null,
-  "convenio": null,
-  "data": null,
-  "horario": null
-}
+No final da resposta, retorne SEMPRE o JSON consolidado com esses dados. Mesmo que nem todos os dados tenham sido preenchidos ainda, mantenha o JSON com as chaves e valores \`null\`.
 
 Responda em português do Brasil. Separe o texto do JSON com \`---\`.
 `
@@ -73,18 +72,17 @@ Responda em português do Brasil. Separe o texto do JSON com \`---\`.
     const partes = respostaIA.split('---');
     mensagemPaciente = partes[0].trim();
 
-    if (partes[1]) {
-      try {
-        dadosJson = JSON.parse(partes[1].trim());
-        console.log('📦 JSON:', dadosJson);
+    try {
+      dadosJson = JSON.parse(partes[1]);
+      console.log('📦 JSON:', dadosJson);
 
-        console.log('✅ Vai tentar agendar no Google Calendar');
+      if (dadosJson.nome && dadosJson.data && dadosJson.horario) {
         await agendarConsultaGoogleCalendar(dadosJson);
-      } catch (e) {
-        console.error('❌ Erro ao interpretar JSON:', e.message);
+        console.log('✅ Consulta agendada no Google Calendar');
       }
-    } else {
-      console.error('❌ JSON não encontrado na resposta da IA');
+
+    } catch (e) {
+      console.error('❌ Erro ao interpretar JSON:', e.message);
     }
 
   } catch (err) {
@@ -97,9 +95,12 @@ Responda em português do Brasil. Separe o texto do JSON com \`---\`.
   res.type('text/xml').send(twiml.toString());
 });
 
-// --------------------------------
-// Google Calendar Function
-// --------------------------------
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+  console.log(`🟢 Servidor rodando na porta ${port}`);
+});
+
+// 🔧 Função para agendar no Google Calendar
 async function agendarConsultaGoogleCalendar(dados) {
   const auth = new google.auth.GoogleAuth({
     keyFile: 'credentials.json',
@@ -108,25 +109,32 @@ async function agendarConsultaGoogleCalendar(dados) {
 
   const calendar = google.calendar({ version: 'v3', auth });
 
-  const startDateTime = new Date(`${dados.data}T${dados.horario}:00`);
-  const endDateTime = new Date(startDateTime.getTime() + 30 * 60000);
+  const dataFormatada = dados.data;
+  const horarioFormatado = dados.horario;
 
   const evento = {
     summary: `Consulta: ${dados.nome}`,
-    description: `Atendimento: ${dados.tipo_atendimento}${dados.convenio ? ` - Convênio: ${dados.convenio}` : ''}`,
-    start: { dateTime: startDateTime.toISOString(), timeZone: 'America/Sao_Paulo' },
-    end: { dateTime: endDateTime.toISOString(), timeZone: 'America/Sao_Paulo' }
+    description: `Atendimento: ${dados.tipo_atendimento}${dados.convenio ? ' - Convênio: ' + dados.convenio : ''}`,
+    start: {
+      dateTime: `${dataFormatada}T${horarioFormatado}:00`,
+      timeZone: 'America/Sao_Paulo'
+    },
+    end: {
+      dateTime: `${dataFormatada}T${incrementaMeiaHora(horarioFormatado)}`,
+      timeZone: 'America/Sao_Paulo'
+    }
   };
 
   await calendar.events.insert({
     calendarId: process.env.CALENDAR_ID,
     resource: evento
   });
-
-  console.log('✅ Consulta adicionada ao Google Calendar!');
 }
 
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log(`🟢 Servidor rodando na porta ${port}`);
-});
+function incrementaMeiaHora(horario) {
+  const [h, m] = horario.split(':').map(Number);
+  const novaData = new Date();
+  novaData.setHours(h);
+  novaData.setMinutes(m + 30);
+  return novaData.toTimeString().slice(0, 5) + ':00';
+}
