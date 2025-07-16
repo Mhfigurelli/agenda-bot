@@ -71,7 +71,7 @@ Durante a conversa com o paciente, colete:
 - nome completo
 - tipo de atendimento: convênio ou particular
 - nome do convênio (se aplicável)
-- data preferida (formato: 2025-07-05)
+- data preferida (formato: DD/MM/AAAA)
 - horário preferido (formato: 14:00)
 
 Ofereça no máximo duas opções de horário para cada dia.
