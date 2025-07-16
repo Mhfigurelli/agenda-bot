@@ -119,8 +119,24 @@ Responda em português do Brasil. Separe o texto do JSON com três hifens (\`---
 
       // 🔁 Agenda se tiver os campos obrigatórios
       if (dadosJson.nome && dadosJson.data && dadosJson.horario) {
-        await agendarConsultaGoogleCalendar(dadosJson);
-      }
+  try {
+    // Normaliza o horário para o formato HH:mm
+    let horario = dadosJson.horario.toString().replace(/[^\d]/g, '');
+    if (horario.length === 4) {
+      horario = horario.slice(0, 2) + ':' + horario.slice(2);
+    } else if (horario.length === 2) {
+      horario = horario + ':00';
+    } else {
+      throw new Error('Formato de horário inválido');
+    }
+    dadosJson.horario = horario;
+
+    await agendarConsultaGoogleCalendar(dadosJson);
+  } catch (err) {
+    console.error('⛔ Erro ao preparar horário para o agendamento:', err.message);
+  }
+}
+
 
     } catch (e) {
       console.error('❌ Erro ao interpretar JSON:', e.message);
