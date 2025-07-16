@@ -103,7 +103,7 @@ app.listen(port, () => {
 // 🔧 Função para agendar no Google Calendar
 async function agendarConsultaGoogleCalendar(dados) {
   try {
-    if (!dados.nome || !dados.data || !dados.horario) {
+    if (!dados.nome_completo || !dados.data_preferencia || !dados.horario_preferencia) {
       console.log('❌ Dados incompletos para agendamento. JSON:', dados);
       return;
     }
@@ -115,11 +115,11 @@ async function agendarConsultaGoogleCalendar(dados) {
 
     const calendar = google.calendar({ version: 'v3', auth });
 
-    const startDateTime = new Date(`${dados.data}T${dados.horario}:00-03:00`);
+    const startDateTime = new Date(`${dados.data_preferencia}T${dados.horario_preferencia}:00-03:00`);
     const endDateTime = new Date(startDateTime.getTime() + 30 * 60000); // 30 min depois
 
     const evento = {
-      summary: `Consulta: ${dados.nome}`,
+      summary: `Consulta: ${dados.nome_completo}`,
       description: `Atendimento: ${dados.tipo_atendimento}${dados.convenio ? ' - Convênio: ' + dados.convenio : ''}`,
       start: { dateTime: startDateTime.toISOString(), timeZone: 'America/Sao_Paulo' },
       end: { dateTime: endDateTime.toISOString(), timeZone: 'America/Sao_Paulo' }
@@ -130,7 +130,7 @@ async function agendarConsultaGoogleCalendar(dados) {
       resource: evento
     });
 
-    console.log('✅ Evento criado:', resultado.data.htmlLink);
+    console.log('✅ Evento criado no Google Calendar:', resultado.data.htmlLink);
   } catch (erro) {
     console.error('❌ Erro ao agendar consulta:', erro.response?.data || erro.message);
   }
