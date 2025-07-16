@@ -67,7 +67,8 @@ Responda em português do Brasil. Separe o texto do JSON com \`---\`.
     mensagemPaciente = partes[0].trim();
 
     try {
-      dadosJson = JSON.parse(partes[1]);
+      const jsonStringLimpo = partes[1].replace(/`/g, '"'); // substitui crase por aspas
+dadosJson = JSON.parse(jsonStringLimpo);
       console.log('\ud83d\udce6 JSON:', dadosJson);
 
       // Chama o agendamento
