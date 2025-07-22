@@ -10,17 +10,31 @@ app.use(express.urlencoded({ extended: false }));
 
 // Verificar variáveis de ambiente
 const requiredEnvVars = ['DEEPSEEK_API_KEY', 'GOOGLE_CREDENTIALS', 'CALENDAR_ID'];
+let envError = null;
 requiredEnvVars.forEach((envVar) => {
   if (!process.env[envVar]) {
-    console.error(`❌ Variável de ambiente ${envVar} não definida.`);
-    process.exit(1);
+    envError = `❌ Variável de ambiente ${envVar} não definida.`;
+    console.error(envError);
   }
 });
 
-// Log para depuração
-console.log('🔑 GOOGLE_CREDENTIALS client_email:', JSON.parse(process.env.GOOGLE_CREDENTIALS).client_email);
+// Validar GOOGLE_CREDENTIALS
+let googleCredentials;
+try {
+  googleCredentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+  console.log('🔑 GOOGLE_CREDENTIALS client_email:', googleCredentials.client_email);
+} catch (e) {
+  envError = `❌ Erro ao parsear GOOGLE_CREDENTIALS: ${e.message}`;
+  console.error(envError);
+}
+
 console.log('📅 CALENDAR_ID:', process.env.CALENDAR_ID);
 console.log('🔐 DEEPSEEK_API_KEY configurada:', !!process.env.DEEPSEEK_API_KEY);
+
+if (envError) {
+  console.error('🚫 Servidor não iniciado devido a erros de configuração.');
+  process.exit(1);
+}
 
 const historicoConversas = {};
 
@@ -44,8 +58,8 @@ Durante a conversa com o paciente, colete:
 
 Instruções:
 1. Pergunte um dado por vez, na ordem: nome, tipo de atendimento, convênio (se necessário), data, horário.
-2. Valide a data para garantir que está no formato dd/MM/yyyy. Se o paciente fornecer algo como "amanhã" ou "terça-feira", peça para especificar no formato correto.
-3. Valide o horário para garantir que está no formato HH:mm (ex.: "09:00", não "9h" ou "9:00 AM").
+2. Valide a data para garantir que está no formato dd/MM/yyyy. Se o paciente fornecer algo como "amanhã" ou "terça-feira", peça para especificar no formato correto (ex.: "Por favor, informe a data no formato dd/MM/yyyy, como 23/07/2025").
+3. Valide o horário para garantir que está no formato HH:mm (ex.: "09:00", não "9h" ou "9:00 AM"). Se o formato estiver errado, peça para corrigir (ex.: "Por favor, informe o horário no formato HH:mm, como 09:00").
 4. Ofereça no máximo duas opções de horário para cada dia, verificando disponibilidade.
 5. Responda em português do Brasil, com tom profissional e amigável.
 6. No final da resposta, retorne SEMPRE um JSON válido com as chaves: {"nome_completo": null, "tipo_atendimento": null, "nome_convenio": null, "data_preferencial": null, "horario_preferencial": null}, preenchendo apenas os dados já coletados. Separe o texto do JSON com "---".
@@ -60,6 +74,11 @@ Exemplo com dados parciais:
 Olá, Marcelo! Você prefere atendimento particular ou por convênio?
 ---
 {"nome_completo": "Marcelo Figurelli", "tipo_atendimento": null, "nome_convenio": null, "data_preferencial": null, "horario_preferencial": null}
+
+Exemplo de validação:
+Por favor, informe a data no formato dd/MM/yyyy, como 23/07/2025.
+---
+{"nome_completo": "Marcelo Figurelli", "tipo_atendimento": "convênio", "nome_convenio": "Unimed", "data_preferencial": null, "horario_preferencial": null}
         `
       }
     ];
@@ -100,7 +119,7 @@ Olá, Marcelo! Você prefere atendimento particular ou por convênio?
           console.log('📦 JSON recebido:', dadosJson);
         } catch (e) {
           console.error('❌ Erro ao parsear JSON:', e.message, 'JSON bruto:', jsonStr);
-          mensagemPaciente = 'Desculpe, houve um problema ao processar sua solicitação. Tente novamente.';
+          mensagemPaciente = 'Desculpe, houve um problema ao processar sua solicitação. Por favor, forneça os dados no formato correto.';
         }
       } else {
         console.log('ℹ️ JSON não encontrado na resposta');
@@ -138,7 +157,7 @@ Olá, Marcelo! Você prefere atendimento particular ou por convênio?
       }
     } catch (e) {
       console.error('❌ Erro ao interpretar JSON:', e.message);
-      mensagemPaciente = 'Desculpe, houve um problema ao processar sua solicitação. Tente novamente.';
+      mensagemPaciente = 'Desculpe, houve um problema ao processar sua solicitação. Por favor, forneça os dados no formato correto.';
     }
   } catch (err) {
     console.error('❌ DeepSeek Error:', err.message);
@@ -157,7 +176,7 @@ app.listen(port, () => {
 
 async function agendarConsultaGoogleCalendar(dados) {
   const auth = new google.auth.GoogleAuth({
-    credentials: JSON.parse(process.env.GOOGLE_CREDENTIALS),
+    credentials: googleCredentials,
     scopes: ['https://www.googleapis.com/auth/calendar']
   });
 
