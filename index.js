@@ -42,7 +42,7 @@ Ofereça no máximo duas opções de horário para cada dia, verificando disponi
 Responda em português do Brasil, com tom profissional e amigável. No final da resposta, retorne SEMPRE um JSON com as chaves: {"nome_completo": null, "tipo_atendimento": null, "nome_convenio": null, "data_preferencial": null, "horario_preferencial": null}, preenchendo apenas os dados já coletados. Separe o texto do JSON com "---". Exemplo:
 Olá, qual é o seu nome completo?
 ---
-{"nome_completo": null, " Pertencente ao tipo_atendimento": null, "nome_convenio": null, "data_preferencial": null, "horario_preferencial": null}
+{"nome_completo": null, "tipo_atendimento": null, "nome_convenio": null, "data_preferencial": null, "horario_preferencial": null}
         `
       }
     ];
@@ -87,19 +87,24 @@ Olá, qual é o seu nome completo?
         dadosJson.data_preferencial &&
         dadosJson.horario_preferencial
       ) {
-        const dataParsed = parse(dadosJson.data_preferencial, 'dd/MM/yyyy', new Date());
-        const horarioParsed = parse(dadosJson.horario_preferencial, 'HH:mm', new Date());
-        const dadosFormatados = {
-          nome: dadosJson.nome_completo,
-          tipo_atendimento: dadosJson.tipo_atendimento,
-          convenio: dadosJson.nome_convenio,
-          data: format(dataParsed, 'yyyy-MM-dd'),
-          horario: format(horarioParsed, 'HH:mm')
-        };
+        try {
+          const dataParsed = parse(dadosJson.data_preferencial, 'dd/MM/yyyy', new Date());
+          const horarioParsed = parse(dadosJson.horario_preferencial, 'HH:mm', new Date());
+          const dadosFormatados = {
+            nome: dadosJson.nome_completo,
+            tipo_atendimento: dadosJson.tipo_atendimento,
+            convenio: dadosJson.nome_convenio,
+            data: format(dataParsed, 'yyyy-MM-dd'),
+            horario: format(horarioParsed, 'HH:mm')
+          };
 
-        console.log('📤 Agendando com:', dadosFormatados);
-        await agendarConsultaGoogleCalendar(dadosFormatados);
-        mensagemPaciente += '\n\n✅ Consulta agendada com sucesso!';
+          console.log('📤 Agendando com:', dadosFormatados);
+          await agendarConsultaGoogleCalendar(dadosFormatados);
+          mensagemPaciente += '\n\n✅ Consulta agendada com sucesso!';
+        } catch (e) {
+          console.error('❌ Erro ao formatar data/horário:', e.message);
+          mensagemPaciente = 'Desculpe, o formato da data ou horário está inválido. Por favor, use o formato dd/MM/yyyy para data e HH:mm para horário.';
+        }
       } else {
         console.log('ℹ️ JSON incompleto, aguardando mais dados...');
       }
@@ -146,6 +151,7 @@ async function agendarConsultaGoogleCalendar(dados) {
   };
 
   try {
+    console.log('📅 Evento a ser criado:', JSON.stringify(evento, null, 2));
     await calendar.events.insert({
       calendarId: process.env.CALENDAR_ID,
       resource: evento
@@ -161,12 +167,16 @@ async function verificarDisponibilidade(calendar, dados) {
   const startDateTime = new Date(`${dados.data}T${dados.horario}:00-03:00`);
   const endDateTime = new Date(startDateTime.getTime() + 30 * 60000);
 
-  const eventos = await calendar.events.list({
-    calendarId: process.env.CALENDAR_ID,
-    timeMin: startDateTime.toISOString(),
-    timeMax: endDateTime.toISOString(),
-    timeZone: 'America/Sao_Paulo'
-  });
-
-  return eventos.data.items.length === 0;
+  try {
+    const eventos = await calendar.events.list({
+      calendarId: process.env.CALENDAR_ID,
+      timeMin: startDateTime.toISOString(),
+      timeMax: endDateTime.toISOString(),
+      timeZone: 'America/Sao_Paulo'
+    });
+    return eventos.data.items.length === 0;
+  } catch (err) {
+    console.error('❌ Erro ao verificar disponibilidade:', err.message);
+    throw err;
+  }
 }
