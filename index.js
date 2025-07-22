@@ -17,6 +17,11 @@ requiredEnvVars.forEach((envVar) => {
   }
 });
 
+// Log para depuração
+console.log('🔑 GOOGLE_CREDENTIALS client_email:', JSON.parse(process.env.GOOGLE_CREDENTIALS).client_email);
+console.log('📅 CALENDAR_ID:', process.env.CALENDAR_ID);
+console.log('🔐 DEEPSEEK_API_KEY configurada:', !!process.env.DEEPSEEK_API_KEY);
+
 const historicoConversas = {};
 
 app.post('/whatsapp', async (req, res) => {
@@ -31,18 +36,30 @@ app.post('/whatsapp', async (req, res) => {
 Você é um atendente virtual da clínica da Dra. Carolina Figurelli, urologista em Porto Alegre, que atende no Medplex Santana – Rua Gomes Jardim, 201 – sala 1602.
 
 Durante a conversa com o paciente, colete:
-- nome_completo
+- nome_completo (nome completo do paciente, ex.: "João Silva")
 - tipo_atendimento: "convênio" ou "particular"
-- nome_convenio (se tipo_atendimento for "convênio", senão null)
-- data_preferencial (formato: dd/MM/yyyy)
-- horario_preferencial (formato: HH:mm)
+- nome_convenio (nome do convênio se tipo_atendimento for "convênio", senão null, ex.: "Unimed")
+- data_preferencial (data no formato exato dd/MM/yyyy, ex.: "23/07/2025")
+- horario_preferencial (horário no formato exato HH:mm, ex.: "09:00")
 
-Ofereça no máximo duas opções de horário para cada dia, verificando disponibilidade.
+Instruções:
+1. Pergunte um dado por vez, na ordem: nome, tipo de atendimento, convênio (se necessário), data, horário.
+2. Valide a data para garantir que está no formato dd/MM/yyyy. Se o paciente fornecer algo como "amanhã" ou "terça-feira", peça para especificar no formato correto.
+3. Valide o horário para garantir que está no formato HH:mm (ex.: "09:00", não "9h" ou "9:00 AM").
+4. Ofereça no máximo duas opções de horário para cada dia, verificando disponibilidade.
+5. Responda em português do Brasil, com tom profissional e amigável.
+6. No final da resposta, retorne SEMPRE um JSON válido com as chaves: {"nome_completo": null, "tipo_atendimento": null, "nome_convenio": null, "data_preferencial": null, "horario_preferencial": null}, preenchendo apenas os dados já coletados. Separe o texto do JSON com "---".
+7. Não inclua nenhum texto ou caracteres adicionais (como "*" ou explicações) após o "---", apenas o JSON.
 
-Responda em português do Brasil, com tom profissional e amigável. No final da resposta, retorne SEMPRE um JSON com as chaves: {"nome_completo": null, "tipo_atendimento": null, "nome_convenio": null, "data_preferencial": null, "horario_preferencial": null}, preenchendo apenas os dados já coletados. Separe o texto do JSON com "---". Exemplo:
+Exemplo de resposta:
 Olá, qual é o seu nome completo?
 ---
 {"nome_completo": null, "tipo_atendimento": null, "nome_convenio": null, "data_preferencial": null, "horario_preferencial": null}
+
+Exemplo com dados parciais:
+Olá, Marcelo! Você prefere atendimento particular ou por convênio?
+---
+{"nome_completo": "Marcelo Figurelli", "tipo_atendimento": null, "nome_convenio": null, "data_preferencial": null, "horario_preferencial": null}
         `
       }
     ];
@@ -76,10 +93,18 @@ Olá, qual é o seu nome completo?
       const partes = respostaIA.split('---');
       mensagemPaciente = partes[0]?.trim() || 'Sem mensagem de resposta';
       if (partes.length > 1 && partes[1].trim()) {
-        dadosJson = JSON.parse(partes[1]);
-        console.log('📦 JSON recebido:', dadosJson);
+        // Remover possíveis caracteres inválidos ou texto adicional
+        const jsonStr = partes[1].trim().replace(/[\*`]/g, '');
+        try {
+          dadosJson = JSON.parse(jsonStr);
+          console.log('📦 JSON recebido:', dadosJson);
+        } catch (e) {
+          console.error('❌ Erro ao parsear JSON:', e.message, 'JSON bruto:', jsonStr);
+          mensagemPaciente = 'Desculpe, houve um problema ao processar sua solicitação. Tente novamente.';
+        }
       } else {
         console.log('ℹ️ JSON não encontrado na resposta');
+        mensagemPaciente = 'Desculpe, por favor forneça os dados no formato correto.';
       }
 
       if (
@@ -90,6 +115,9 @@ Olá, qual é o seu nome completo?
         try {
           const dataParsed = parse(dadosJson.data_preferencial, 'dd/MM/yyyy', new Date());
           const horarioParsed = parse(dadosJson.horario_preferencial, 'HH:mm', new Date());
+          if (isNaN(dataParsed.getTime()) || isNaN(horarioParsed.getTime())) {
+            throw new Error('Data ou horário inválido');
+          }
           const dadosFormatados = {
             nome: dadosJson.nome_completo,
             tipo_atendimento: dadosJson.tipo_atendimento,
@@ -103,7 +131,7 @@ Olá, qual é o seu nome completo?
           mensagemPaciente += '\n\n✅ Consulta agendada com sucesso!';
         } catch (e) {
           console.error('❌ Erro ao formatar data/horário:', e.message);
-          mensagemPaciente = 'Desculpe, o formato da data ou horário está inválido. Por favor, use o formato dd/MM/yyyy para data e HH:mm para horário.';
+          mensagemPaciente = 'Desculpe, o formato da data ou horário está inválido. Por favor, use o formato dd/MM/yyyy para data (ex.: 23/07/2025) e HH:mm para horário (ex.: 09:00).';
         }
       } else {
         console.log('ℹ️ JSON incompleto, aguardando mais dados...');
