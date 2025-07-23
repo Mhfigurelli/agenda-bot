@@ -78,7 +78,7 @@ Instruções:
    - "meio-dia" → "12:00"
    - "cinco da tarde" → "17:00"
    Se o horário for ambíguo (ex.: "9" ou "9:00" sem "manhã/tarde"), assuma manhã (ex.: "09:00"). Se inválido, pergunte para esclarecer (ex.: "Você quis dizer 05:00 da manhã ou 17:00 da tarde? Ou informe como 'às 9', '15 horas', ou HH:mm.").
-4. Antes de oferecer horários, você receberá uma lista de horários disponíveis para o dia solicitado (ex.: "09:00, 10:00"). Ofereça APENAS esses horários, até dois por dia. Se não houver horários disponíveis, informe que o dia está cheio e peça outra data.
+4. Você receberá uma mensagem do sistema com os horários disponíveis para o dia solicitado (ex.: "Horários disponíveis para 30/07/2025: 09:00, 10:00"). OFEREÇA APENAS ESSES HORÁRIOS, até dois por dia. Se a mensagem indicar "nenhum horário disponível", informe que o dia está cheio e peça outra data.
 5. Responda em português do Brasil, com tom profissional, amigável e natural, como um atendente humano.
 6. No final da resposta, retorne SEMPRE um JSON válido com as chaves: {"nome_completo": null, "tipo_atendimento": null, "nome_convenio": null, "data_preferencial": null, "horario_preferencial": null}, preenchendo apenas os dados já coletados. Separe o texto do JSON com "---".
 7. Não inclua nenhum texto ou caracteres adicionais (como "*" ou explicações) após o "---", apenas o JSON.
@@ -113,29 +113,26 @@ Para 30/07/2025, os horários disponíveis são 09:00 e 10:00. Qual você prefer
   let dadosJson = {};
 
   try {
-    // Se a IA solicitou um horário, verificar disponibilidade
+    // Verificar se a IA está prestes a oferecer horários (após data_preferencial ser preenchida)
     let horariosDisponiveis = [];
-    if (historicoConversas[telefone].some(m => m.content.includes('horários disponíveis'))) {
+    const ultimaMensagemIA = historicoConversas[telefone]
+      .filter(m => m.role === 'assistant')
+      .slice(-1)[0]?.content || '';
+    const partesUltimaMensagem = ultimaMensagemIA.split('---');
+    if (partesUltimaMensagem.length > 1) {
+      const jsonStr = partesUltimaMensagem[1].trim().replace(/[\*`]/g, '');
       try {
-        const ultimaMensagemIA = historicoConversas[telefone]
-          .filter(m => m.role === 'assistant')
-          .slice(-1)[0]?.content;
-        const partes = ultimaMensagemIA ? ultimaMensagemIA.split('---') : [];
-        if (partes.length > 1) {
-          const jsonStr = partes[1].trim().replace(/[\*`]/g, '');
-          const dadosTemp = JSON.parse(jsonStr);
-          if (dadosTemp.data_preferencial) {
-            horariosDisponiveis = await obterHorariosDisponiveis(dadosTemp.data_preferencial);
-            console.log('🕒 Horários disponíveis para', dadosTemp.data_preferencial, ':', horariosDisponiveis);
-            // Adicionar horários disponíveis ao histórico como uma mensagem do sistema
-            historicoConversas[telefone].push({
-              role: 'system',
-              content: `Horários disponíveis para ${dadosTemp.data_preferencial}: ${horariosDisponiveis.join(', ') || 'nenhum horário disponível'}. Ofereça apenas esses horários.`
-            });
-          }
+        const dadosTemp = JSON.parse(jsonStr);
+        if (dadosTemp.data_preferencial && !dadosTemp.horario_preferencial) {
+          horariosDisponiveis = await obterHorariosDisponiveis(dadosTemp.data_preferencial);
+          console.log('🕒 Horários disponíveis para', dadosTemp.data_preferencial, ':', horariosDisponiveis);
+          historicoConversas[telefone].push({
+            role: 'system',
+            content: `Horários disponíveis para ${dadosTemp.data_preferencial}: ${horariosDisponiveis.length > 0 ? horariosDisponiveis.join(', ') : 'nenhum horário disponível'}. Ofereça apenas esses horários ou informe que o dia está cheio.`
+          });
         }
       } catch (e) {
-        console.error('❌ Erro ao obter horários disponíveis:', e.message);
+        console.error('❌ Erro ao parsear JSON da última mensagem:', e.message);
       }
     }
 
@@ -144,7 +141,7 @@ Para 30/07/2025, os horários disponíveis são 09:00 e 10:00. Qual você prefer
       {
         model: 'deepseek-chat',
         messages: historicoConversas[telefone],
-        temperature: 0.7
+        temperature: 0.6 // Reduzido para maior precisão
       },
       {
         headers: {
@@ -199,14 +196,29 @@ Para 30/07/2025, os horários disponíveis são 09:00 e 10:00. Qual você prefer
             horario: format(horarioParsed, 'HH:mm')
           };
 
+          // Verificar disponibilidade antes de agendar
+          const isDisponivel = await verificarDisponibilidade(dadosFormatados);
+          if (!isDisponivel) {
+            horariosDisponiveis = await obterHorariosDisponiveis(dadosJson.data_preferencial);
+            console.log('🕒 Novos horários disponíveis para', dadosJson.data_preferencial, ':', horariosDisponiveis);
+            historicoConversas[telefone] = historicoConversas[telefone].slice(0, -2); // Remove última mensagem do usuário e resposta da IA
+            historicoConversas[telefone].push({
+              role: 'system',
+              content: `Horários disponíveis para ${dadosJson.data_preferencial}: ${horariosDisponiveis.length > 0 ? horariosDisponiveis.join(', ') : 'nenhum horário disponível'}. Ofereça apenas esses horários ou informe que o dia está cheio.`
+            });
+            throw new Error(`Horário ${dadosJson.horario_preferencial} já ocupado`);
+          }
+
           console.log('📤 Agendando com:', dadosFormatados);
           await agendarConsultaGoogleCalendar(dadosFormatados);
           mensagemPaciente += '\n\n✅ Consulta agendada com sucesso!';
+          // Limpar histórico após agendamento bem-sucedido
+          delete historicoConversas[telefone];
         } catch (e) {
           console.error('❌ Erro ao formatar ou agendar:', e.message);
           mensagemPaciente = `Desculpe, não consegui agendar a consulta. ${
             e.message.includes('Horário já ocupado')
-              ? `O horário ${dadosJson.horario_preferencial} em ${dadosJson.data_preferencial} já está ocupado. Por favor, escolha outro horário, como "às 9", "15 horas", ou no formato HH:mm.`
+              ? `O horário ${dadosJson.horario_preferencial} em ${dadosJson.data_preferencial} já está ocupado. Os horários disponíveis são: ${horariosDisponiveis.length > 0 ? horariosDisponiveis.join(', ') : 'nenhum horário disponível neste dia'}. Qual você prefere?`
               : `Por favor, use termos como "amanhã", "quarta da próxima semana", "às 9", ou os formatos dd/MM/yyyy (ex.: 23/07/2025) e HH:mm (ex.: 09:00).${e.message.includes('anterior') ? ` A data deve ser hoje (${hoje}) ou futura.` : ''}`
           }`;
         }
@@ -243,11 +255,6 @@ async function agendarConsultaGoogleCalendar(dados) {
   const startDateTime = new Date(`${dados.data}T${dados.horario}:00-03:00`);
   const endDateTime = new Date(startDateTime.getTime() + 30 * 60000);
 
-  const isDisponivel = await verificarDisponibilidade(calendar, dados);
-  if (!isDisponivel) {
-    throw new Error('Horário já ocupado');
-  }
-
   const evento = {
     summary: `Consulta: ${dados.nome}`,
     description: `Atendimento: ${dados.tipo_atendimento}${dados.convenio ? ` - Convênio: ${dados.convenio}` : ''}`,
@@ -268,7 +275,14 @@ async function agendarConsultaGoogleCalendar(dados) {
   }
 }
 
-async function verificarDisponibilidade(calendar, dados) {
+async function verificarDisponibilidade(dados) {
+  const auth = new google.auth.GoogleAuth({
+    credentials: googleCredentials,
+    scopes: ['https://www.googleapis.com/auth/calendar']
+  });
+
+  const calendar = google.calendar({ version: 'v3', auth });
+
   const startDateTime = new Date(`${dados.data}T${dados.horario}:00-03:00`);
   const endDateTime = new Date(startDateTime.getTime() + 30 * 60000);
 
@@ -302,7 +316,7 @@ async function obterHorariosDisponiveis(data) {
   const startOfDay = new Date(dataParsed.setHours(0, 0, 0, 0));
   const endOfDay = new Date(dataParsed.setHours(23, 59, 59, 999));
 
-  // Lista de horários possíveis (ex.: das 8h às 18h, a cada 30 minutos)
+  // Lista de horários possíveis (das 8h às 18h, a cada 30 minutos)
   const horariosPossiveis = [];
   for (let hora = 8; hora <= 18; hora++) {
     horariosPossiveis.push(`${hora.toString().padStart(2, '0')}:00`);
