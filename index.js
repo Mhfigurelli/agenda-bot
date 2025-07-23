@@ -63,18 +63,23 @@ Durante a conversa com o paciente, colete:
 
 Instruções:
 1. Pergunte um dado por vez, na ordem: nome, tipo de atendimento, convênio (se necessário), data, horário.
-2. Para a data, aceite expressões relativas como "hoje", "amanhã", "quarta da próxima semana", "próxima sexta" ou datas no formato dd/MM/yyyy. Converta-as para o formato dd/MM/yyyy com base na data atual (${hoje}). Exemplos:
+2. Para a data, priorize entender linguagem natural e converta para dd/MM/yyyy com base na data atual (${hoje}). Aceite expressões como:
+   - "hoje" → "${hoje}"
    - "amanhã" → "${format(addDays(new Date(), 1), 'dd/MM/yyyy')}"
    - "quarta da próxima semana" → "${format(nextWednesday(addDays(new Date(), 7)), 'dd/MM/yyyy')}"
-   - "próxima sexta" → calcule a próxima sexta-feira após ${hoje}.
-   Valide que a data é igual ou posterior a hoje (${hoje}). Se a data for inválida ou anterior, peça para especificar no formato dd/MM/yyyy (ex.: "Por favor, informe uma data válida no formato dd/MM/yyyy, como 23/07/2025").
-3. Para o horário, aceite formatos como "às 9", "9h", "9 da manhã", "15 horas" e converta para HH:mm. Exemplos:
+   - "próxima sexta" → próxima sexta-feira após ${hoje}
+   - "daqui a dois dias" → "${format(addDays(new Date(), 2), 'dd/MM/yyyy')}"
+   - "terça" → próxima terça-feira após ${hoje}
+   Valide que a data é igual ou posterior a hoje (${hoje}). Se a data for ambígua (ex.: "quarta" sem especificar qual), pergunte se é a próxima quarta-feira (ex.: "${format(nextWednesday(new Date()), 'dd/MM/yyyy')}") ou peça a data no formato dd/MM/yyyy.
+3. Para o horário, priorize entender linguagem natural e converta para HH:mm. Aceite expressões como:
    - "às 9" ou "9h" → "09:00" (assuma manhã, a menos que especificado)
    - "15 horas" ou "às 15" → "15:00"
    - "9 da noite" → "21:00"
-   Se o formato estiver errado, peça para corrigir (ex.: "Por favor, informe o horário no formato HH:mm, como 09:00, ou use 'às 9', '15 horas', etc.").
+   - "meio-dia" → "12:00"
+   - "cinco da tarde" → "17:00"
+   Se o horário for ambíguo (ex.: "às 5" sem "manhã" ou "tarde"), pergunte se é manhã ou tarde. Se inválido, peça para corrigir (ex.: "Por favor, informe o horário como 'às 9', '15 horas', ou no formato HH:mm, como 09:00").
 4. Ofereça no máximo duas opções de horário para cada dia, verificando disponibilidade.
-5. Responda em português do Brasil, com tom profissional e amigável.
+5. Responda em português do Brasil, com tom profissional, amigável e natural, como um atendente humano.
 6. No final da resposta, retorne SEMPRE um JSON válido com as chaves: {"nome_completo": null, "tipo_atendimento": null, "nome_convenio": null, "data_preferencial": null, "horario_preferencial": null}, preenchendo apenas os dados já coletados. Separe o texto do JSON com "---".
 7. Não inclua nenhum texto ou caracteres adicionais (como "*" ou explicações) após o "---", apenas o JSON.
 
@@ -89,14 +94,14 @@ Olá, Marcelo! Você prefere atendimento particular ou por convênio?
 {"nome_completo": "Marcelo Figurelli", "tipo_atendimento": null, "nome_convenio": null, "data_preferencial": null, "horario_preferencial": null}
 
 Exemplo de validação de data:
-Por favor, informe uma data válida no formato dd/MM/yyyy, como 23/07/2025, ou use termos como "amanhã" ou "quarta da próxima semana".
+Você quis dizer a próxima quarta-feira (${format(nextWednesday(new Date()), 'dd/MM/yyyy')})? Ou informe a data no formato dd/MM/yyyy, como 23/07/2025.
 ---
 {"nome_completo": "Marcelo Figurelli", "tipo_atendimento": "convênio", "nome_convenio": "Unimed", "data_preferencial": null, "horario_preferencial": null}
 
 Exemplo de validação de horário:
-Por favor, informe o horário no formato HH:mm, como 09:00, ou use termos como "às 9" ou "15 horas".
+Você quis dizer 05:00 da manhã ou 17:00 da tarde? Ou informe o horário como 'às 9', '15 horas', ou no formato HH:mm, como 09:00.
 ---
-{"nome_completo": "Marcelo Figurelli", "tipo_atendimento": "convênio", "nome_convenio": "Unimed", "data_preferencial": "23/07/2025", "horario_preferencial": null}
+{"nome_completo": "Marcelo Figurelli", "tipo_atendimento": "convênio", "nome_convenio": "Unimed", "data_preferencial": "30/07/2025", "horario_preferencial": null}
         `
       }
     ];
@@ -135,6 +140,7 @@ Por favor, informe o horário no formato HH:mm, como 09:00, ou use termos como "
         try {
           dadosJson = JSON.parse(jsonStr);
           console.log('📦 JSON recebido:', dadosJson);
+          console.log('📥 Mensagem do usuário:', msg);
         } catch (e) {
           console.error('❌ Erro ao parsear JSON:', e.message, 'JSON bruto:', jsonStr);
           mensagemPaciente = 'Desculpe, houve um problema ao processar sua solicitação. Por favor, forneça os dados no formato correto.';
@@ -173,7 +179,7 @@ Por favor, informe o horário no formato HH:mm, como 09:00, ou use termos como "
           mensagemPaciente += '\n\n✅ Consulta agendada com sucesso!';
         } catch (e) {
           console.error('❌ Erro ao formatar data/horário:', e.message);
-          mensagemPaciente = `Desculpe, o formato da data ou horário está inválido. Por favor, use o formato dd/MM/yyyy para data (ex.: 23/07/2025) ou termos como "amanhã", "quarta da próxima semana", e HH:mm para horário (ex.: 09:00) ou termos como "às 9", "15 horas".${e.message.includes('anterior') ? ` A data deve ser hoje (${hoje}) ou futura.` : ''}`;
+          mensagemPaciente = `Desculpe, não consegui entender a data ou horário. Por favor, use termos como "amanhã", "quarta da próxima semana", "às 9", "15 horas", ou os formatos dd/MM/yyyy (ex.: 23/07/2025) e HH:mm (ex.: 09:00).${e.message.includes('anterior') ? ` A data deve ser hoje (${hoje}) ou futura.` : ''}`;
         }
       } else {
         console.log('ℹ️ JSON incompleto, aguardando mais dados...');
