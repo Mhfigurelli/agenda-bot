@@ -72,13 +72,13 @@ Instruções:
    - "terça" → próxima terça-feira após ${hoje}
    Valide que a data é igual ou posterior a hoje (${hoje}). Se a data for ambígua (ex.: "quarta" sem especificar qual), pergunte se é a próxima quarta-feira (ex.: "${format(nextWednesday(new Date()), 'dd/MM/yyyy')}") ou peça a data no formato dd/MM/yyyy.
 3. Para o horário, priorize entender linguagem natural e converta para HH:mm. Aceite expressões como:
-   - "às 9" ou "9h" → "09:00" (assuma manhã, a menos que especificado)
+   - "9" ou "9h" ou "9:00" → "09:00" (assuma manhã, a menos que especificado)
    - "15 horas" ou "às 15" → "15:00"
    - "9 da noite" → "21:00"
    - "meio-dia" → "12:00"
    - "cinco da tarde" → "17:00"
-   Se o horário for ambíguo (ex.: "às 5" sem "manhã" ou "tarde"), pergunte se é manhã ou tarde. Se inválido, peça para corrigir (ex.: "Por favor, informe o horário como 'às 9', '15 horas', ou no formato HH:mm, como 09:00").
-4. Ofereça no máximo duas opções de horário para cada dia, verificando disponibilidade.
+   Se o horário for ambíguo (ex.: "9" ou "9:00" sem "manhã/tarde"), assuma manhã (ex.: "09:00"). Se inválido, pergunte para esclarecer (ex.: "Você quis dizer 05:00 da manhã ou 17:00 da tarde? Ou informe como 'às 9', '15 horas', ou HH:mm.").
+4. Antes de oferecer horários, você receberá uma lista de horários disponíveis para o dia solicitado (ex.: "09:00, 10:00"). Ofereça APENAS esses horários, até dois por dia. Se não houver horários disponíveis, informe que o dia está cheio e peça outra data.
 5. Responda em português do Brasil, com tom profissional, amigável e natural, como um atendente humano.
 6. No final da resposta, retorne SEMPRE um JSON válido com as chaves: {"nome_completo": null, "tipo_atendimento": null, "nome_convenio": null, "data_preferencial": null, "horario_preferencial": null}, preenchendo apenas os dados já coletados. Separe o texto do JSON com "---".
 7. Não inclua nenhum texto ou caracteres adicionais (como "*" ou explicações) após o "---", apenas o JSON.
@@ -98,8 +98,8 @@ Você quis dizer a próxima quarta-feira (${format(nextWednesday(new Date()), 'd
 ---
 {"nome_completo": "Marcelo Figurelli", "tipo_atendimento": "convênio", "nome_convenio": "Unimed", "data_preferencial": null, "horario_preferencial": null}
 
-Exemplo de validação de horário:
-Você quis dizer 05:00 da manhã ou 17:00 da tarde? Ou informe o horário como 'às 9', '15 horas', ou no formato HH:mm, como 09:00.
+Exemplo de oferta de horários:
+Para 30/07/2025, os horários disponíveis são 09:00 e 10:00. Qual você prefere?
 ---
 {"nome_completo": "Marcelo Figurelli", "tipo_atendimento": "convênio", "nome_convenio": "Unimed", "data_preferencial": "30/07/2025", "horario_preferencial": null}
         `
@@ -113,6 +113,32 @@ Você quis dizer 05:00 da manhã ou 17:00 da tarde? Ou informe o horário como '
   let dadosJson = {};
 
   try {
+    // Se a IA solicitou um horário, verificar disponibilidade
+    let horariosDisponiveis = [];
+    if (historicoConversas[telefone].some(m => m.content.includes('horários disponíveis'))) {
+      try {
+        const ultimaMensagemIA = historicoConversas[telefone]
+          .filter(m => m.role === 'assistant')
+          .slice(-1)[0]?.content;
+        const partes = ultimaMensagemIA ? ultimaMensagemIA.split('---') : [];
+        if (partes.length > 1) {
+          const jsonStr = partes[1].trim().replace(/[\*`]/g, '');
+          const dadosTemp = JSON.parse(jsonStr);
+          if (dadosTemp.data_preferencial) {
+            horariosDisponiveis = await obterHorariosDisponiveis(dadosTemp.data_preferencial);
+            console.log('🕒 Horários disponíveis para', dadosTemp.data_preferencial, ':', horariosDisponiveis);
+            // Adicionar horários disponíveis ao histórico como uma mensagem do sistema
+            historicoConversas[telefone].push({
+              role: 'system',
+              content: `Horários disponíveis para ${dadosTemp.data_preferencial}: ${horariosDisponiveis.join(', ') || 'nenhum horário disponível'}. Ofereça apenas esses horários.`
+            });
+          }
+        }
+      } catch (e) {
+        console.error('❌ Erro ao obter horários disponíveis:', e.message);
+      }
+    }
+
     const resp = await axios.post(
       'https://api.deepseek.com/v1/chat/completions',
       {
@@ -135,12 +161,11 @@ Você quis dizer 05:00 da manhã ou 17:00 da tarde? Ou informe o horário como '
       const partes = respostaIA.split('---');
       mensagemPaciente = partes[0]?.trim() || 'Sem mensagem de resposta';
       if (partes.length > 1 && partes[1].trim()) {
-        // Remover possíveis caracteres inválidos ou texto adicional
         const jsonStr = partes[1].trim().replace(/[\*`]/g, '');
         try {
           dadosJson = JSON.parse(jsonStr);
-          console.log('📦 JSON recebido:', dadosJson);
           console.log('📥 Mensagem do usuário:', msg);
+          console.log('📦 JSON recebido:', dadosJson);
         } catch (e) {
           console.error('❌ Erro ao parsear JSON:', e.message, 'JSON bruto:', jsonStr);
           mensagemPaciente = 'Desculpe, houve um problema ao processar sua solicitação. Por favor, forneça os dados no formato correto.';
@@ -178,8 +203,12 @@ Você quis dizer 05:00 da manhã ou 17:00 da tarde? Ou informe o horário como '
           await agendarConsultaGoogleCalendar(dadosFormatados);
           mensagemPaciente += '\n\n✅ Consulta agendada com sucesso!';
         } catch (e) {
-          console.error('❌ Erro ao formatar data/horário:', e.message);
-          mensagemPaciente = `Desculpe, não consegui entender a data ou horário. Por favor, use termos como "amanhã", "quarta da próxima semana", "às 9", "15 horas", ou os formatos dd/MM/yyyy (ex.: 23/07/2025) e HH:mm (ex.: 09:00).${e.message.includes('anterior') ? ` A data deve ser hoje (${hoje}) ou futura.` : ''}`;
+          console.error('❌ Erro ao formatar ou agendar:', e.message);
+          mensagemPaciente = `Desculpe, não consegui agendar a consulta. ${
+            e.message.includes('Horário já ocupado')
+              ? `O horário ${dadosJson.horario_preferencial} em ${dadosJson.data_preferencial} já está ocupado. Por favor, escolha outro horário, como "às 9", "15 horas", ou no formato HH:mm.`
+              : `Por favor, use termos como "amanhã", "quarta da próxima semana", "às 9", ou os formatos dd/MM/yyyy (ex.: 23/07/2025) e HH:mm (ex.: 09:00).${e.message.includes('anterior') ? ` A data deve ser hoje (${hoje}) ou futura.` : ''}`
+          }`;
         }
       } else {
         console.log('ℹ️ JSON incompleto, aguardando mais dados...');
@@ -254,5 +283,49 @@ async function verificarDisponibilidade(calendar, dados) {
   } catch (err) {
     console.error('❌ Erro ao verificar disponibilidade:', err.message);
     throw err;
+  }
+}
+
+async function obterHorariosDisponiveis(data) {
+  const auth = new google.auth.GoogleAuth({
+    credentials: googleCredentials,
+    scopes: ['https://www.googleapis.com/auth/calendar']
+  });
+
+  const calendar = google.calendar({ version: 'v3', auth });
+
+  const dataParsed = parse(data, 'dd/MM/yyyy', new Date());
+  if (isNaN(dataParsed.getTime())) {
+    throw new Error('Data inválida para verificar horários');
+  }
+
+  const startOfDay = new Date(dataParsed.setHours(0, 0, 0, 0));
+  const endOfDay = new Date(dataParsed.setHours(23, 59, 59, 999));
+
+  // Lista de horários possíveis (ex.: das 8h às 18h, a cada 30 minutos)
+  const horariosPossiveis = [];
+  for (let hora = 8; hora <= 18; hora++) {
+    horariosPossiveis.push(`${hora.toString().padStart(2, '0')}:00`);
+    if (hora < 18) horariosPossiveis.push(`${hora.toString().padStart(2, '0')}:30`);
+  }
+
+  try {
+    const eventos = await calendar.events.list({
+      calendarId: process.env.CALENDAR_ID,
+      timeMin: startOfDay.toISOString(),
+      timeMax: endOfDay.toISOString(),
+      timeZone: 'America/Sao_Paulo'
+    });
+
+    const horariosOcupados = eventos.data.items.map(evento => {
+      const start = new Date(evento.start.dateTime);
+      return format(start, 'HH:mm');
+    });
+
+    const horariosLivres = horariosPossiveis.filter(horario => !horariosOcupados.includes(horario));
+    return horariosLivres.slice(0, 2); // Retorna até 2 horários disponíveis
+  } catch (err) {
+    console.error('❌ Erro ao obter horários disponíveis:', err.message);
+    return [];
   }
 }
