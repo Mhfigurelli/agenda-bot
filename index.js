@@ -2,7 +2,7 @@ const express = require('express');
 const axios = require('axios');
 const { google } = require('googleapis');
 const { MessagingResponse } = require('twilio').twiml;
-const { parse, format } = require('date-fns');
+const { parse, format, addDays, nextWednesday } = require('date-fns');
 require('dotenv').config();
 
 const app = express();
@@ -50,7 +50,7 @@ app.post('/whatsapp', async (req, res) => {
       {
         role: 'system',
         content: `
-Você é um atendente virtual da clínica da Dra. Carolina Figurelli, urologista em Porto Alegre, que atende no Medplex Santana – Rua Gomes Jardim, 201 – sala 1602. Hoje é ${hoje}.
+Você é um atendente virtual da clínica da Dra. Carolina Figurelli, urologista em Porto Alegre, que atende no Medplex Santana – Rua Gomes Jardim, 201 – sala 1602. Hoje é ${hoje} (quarta-feira).
 
 Inicie a conversa com: "Bem-vindo(a) ao agendamento da Dra. Carolina Figurelli, como posso ajudar?"
 
@@ -63,8 +63,16 @@ Durante a conversa com o paciente, colete:
 
 Instruções:
 1. Pergunte um dado por vez, na ordem: nome, tipo de atendimento, convênio (se necessário), data, horário.
-2. Valide a data para garantir que está no formato dd/MM/yyyy e que é igual ou posterior a hoje (${hoje}). Se o paciente fornecer algo como "amanhã" ou "terça-feira", peça para especificar no formato correto (ex.: "Por favor, informe a data no formato dd/MM/yyyy, como 23/07/2025").
-3. Valide o horário para garantir que está no formato HH:mm (ex.: "09:00", não "9h" ou "9:00 AM"). Se o formato estiver errado, peça para corrigir (ex.: "Por favor, informe o horário no formato HH:mm, como 09:00").
+2. Para a data, aceite expressões relativas como "hoje", "amanhã", "quarta da próxima semana", "próxima sexta" ou datas no formato dd/MM/yyyy. Converta-as para o formato dd/MM/yyyy com base na data atual (${hoje}). Exemplos:
+   - "amanhã" → "${format(addDays(new Date(), 1), 'dd/MM/yyyy')}"
+   - "quarta da próxima semana" → "${format(nextWednesday(addDays(new Date(), 7)), 'dd/MM/yyyy')}"
+   - "próxima sexta" → calcule a próxima sexta-feira após ${hoje}.
+   Valide que a data é igual ou posterior a hoje (${hoje}). Se a data for inválida ou anterior, peça para especificar no formato dd/MM/yyyy (ex.: "Por favor, informe uma data válida no formato dd/MM/yyyy, como 23/07/2025").
+3. Para o horário, aceite formatos como "às 9", "9h", "9 da manhã", "15 horas" e converta para HH:mm. Exemplos:
+   - "às 9" ou "9h" → "09:00" (assuma manhã, a menos que especificado)
+   - "15 horas" ou "às 15" → "15:00"
+   - "9 da noite" → "21:00"
+   Se o formato estiver errado, peça para corrigir (ex.: "Por favor, informe o horário no formato HH:mm, como 09:00, ou use 'às 9', '15 horas', etc.").
 4. Ofereça no máximo duas opções de horário para cada dia, verificando disponibilidade.
 5. Responda em português do Brasil, com tom profissional e amigável.
 6. No final da resposta, retorne SEMPRE um JSON válido com as chaves: {"nome_completo": null, "tipo_atendimento": null, "nome_convenio": null, "data_preferencial": null, "horario_preferencial": null}, preenchendo apenas os dados já coletados. Separe o texto do JSON com "---".
@@ -80,10 +88,15 @@ Olá, Marcelo! Você prefere atendimento particular ou por convênio?
 ---
 {"nome_completo": "Marcelo Figurelli", "tipo_atendimento": null, "nome_convenio": null, "data_preferencial": null, "horario_preferencial": null}
 
-Exemplo de validação:
-Por favor, informe a data no formato dd/MM/yyyy, como 23/07/2025.
+Exemplo de validação de data:
+Por favor, informe uma data válida no formato dd/MM/yyyy, como 23/07/2025, ou use termos como "amanhã" ou "quarta da próxima semana".
 ---
 {"nome_completo": "Marcelo Figurelli", "tipo_atendimento": "convênio", "nome_convenio": "Unimed", "data_preferencial": null, "horario_preferencial": null}
+
+Exemplo de validação de horário:
+Por favor, informe o horário no formato HH:mm, como 09:00, ou use termos como "às 9" ou "15 horas".
+---
+{"nome_completo": "Marcelo Figurelli", "tipo_atendimento": "convênio", "nome_convenio": "Unimed", "data_preferencial": "23/07/2025", "horario_preferencial": null}
         `
       }
     ];
@@ -160,7 +173,7 @@ Por favor, informe a data no formato dd/MM/yyyy, como 23/07/2025.
           mensagemPaciente += '\n\n✅ Consulta agendada com sucesso!';
         } catch (e) {
           console.error('❌ Erro ao formatar data/horário:', e.message);
-          mensagemPaciente = `Desculpe, o formato da data ou horário está inválido. Por favor, use o formato dd/MM/yyyy para data (ex.: 23/07/2025) e HH:mm para horário (ex.: 09:00).${e.message.includes('anterior') ? ' A data deve ser hoje (${hoje}) ou futura.' : ''}`;
+          mensagemPaciente = `Desculpe, o formato da data ou horário está inválido. Por favor, use o formato dd/MM/yyyy para data (ex.: 23/07/2025) ou termos como "amanhã", "quarta da próxima semana", e HH:mm para horário (ex.: 09:00) ou termos como "às 9", "15 horas".${e.message.includes('anterior') ? ` A data deve ser hoje (${hoje}) ou futura.` : ''}`;
         }
       } else {
         console.log('ℹ️ JSON incompleto, aguardando mais dados...');
