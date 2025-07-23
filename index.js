@@ -38,6 +38,9 @@ if (envError) {
 
 const historicoConversas = {};
 
+// Obter a data atual no formato dd/MM/yyyy
+const hoje = format(new Date(), 'dd/MM/yyyy');
+
 app.post('/whatsapp', async (req, res) => {
   const telefone = req.body.From;
   const msg = req.body && req.body.Body ? req.body.Body.trim() : '';
@@ -47,7 +50,9 @@ app.post('/whatsapp', async (req, res) => {
       {
         role: 'system',
         content: `
-Você é um atendente virtual da clínica da Dra. Carolina Figurelli, urologista em Porto Alegre, que atende no Medplex Santana – Rua Gomes Jardim, 201 – sala 1602.
+Você é um atendente virtual da clínica da Dra. Carolina Figurelli, urologista em Porto Alegre, que atende no Medplex Santana – Rua Gomes Jardim, 201 – sala 1602. Hoje é ${hoje}.
+
+Inicie a conversa com: "Bem-vindo(a) ao agendamento da Dra. Carolina Figurelli, como posso ajudar?"
 
 Durante a conversa com o paciente, colete:
 - nome_completo (nome completo do paciente, ex.: "João Silva")
@@ -58,15 +63,15 @@ Durante a conversa com o paciente, colete:
 
 Instruções:
 1. Pergunte um dado por vez, na ordem: nome, tipo de atendimento, convênio (se necessário), data, horário.
-2. Valide a data para garantir que está no formato dd/MM/yyyy. Se o paciente fornecer algo como "amanhã" ou "terça-feira", peça para especificar no formato correto (ex.: "Por favor, informe a data no formato dd/MM/yyyy, como 23/07/2025").
+2. Valide a data para garantir que está no formato dd/MM/yyyy e que é igual ou posterior a hoje (${hoje}). Se o paciente fornecer algo como "amanhã" ou "terça-feira", peça para especificar no formato correto (ex.: "Por favor, informe a data no formato dd/MM/yyyy, como 23/07/2025").
 3. Valide o horário para garantir que está no formato HH:mm (ex.: "09:00", não "9h" ou "9:00 AM"). Se o formato estiver errado, peça para corrigir (ex.: "Por favor, informe o horário no formato HH:mm, como 09:00").
 4. Ofereça no máximo duas opções de horário para cada dia, verificando disponibilidade.
 5. Responda em português do Brasil, com tom profissional e amigável.
 6. No final da resposta, retorne SEMPRE um JSON válido com as chaves: {"nome_completo": null, "tipo_atendimento": null, "nome_convenio": null, "data_preferencial": null, "horario_preferencial": null}, preenchendo apenas os dados já coletados. Separe o texto do JSON com "---".
 7. Não inclua nenhum texto ou caracteres adicionais (como "*" ou explicações) após o "---", apenas o JSON.
 
-Exemplo de resposta:
-Olá, qual é o seu nome completo?
+Exemplo de resposta inicial:
+Bem-vindo(a) ao agendamento da Dra. Carolina Figurelli, como posso ajudar?
 ---
 {"nome_completo": null, "tipo_atendimento": null, "nome_convenio": null, "data_preferencial": null, "horario_preferencial": null}
 
@@ -137,6 +142,11 @@ Por favor, informe a data no formato dd/MM/yyyy, como 23/07/2025.
           if (isNaN(dataParsed.getTime()) || isNaN(horarioParsed.getTime())) {
             throw new Error('Data ou horário inválido');
           }
+          // Validar se a data é igual ou posterior à data atual
+          const hojeParsed = parse(hoje, 'dd/MM/yyyy', new Date());
+          if (dataParsed < hojeParsed) {
+            throw new Error('Data anterior ao dia atual');
+          }
           const dadosFormatados = {
             nome: dadosJson.nome_completo,
             tipo_atendimento: dadosJson.tipo_atendimento,
@@ -150,7 +160,7 @@ Por favor, informe a data no formato dd/MM/yyyy, como 23/07/2025.
           mensagemPaciente += '\n\n✅ Consulta agendada com sucesso!';
         } catch (e) {
           console.error('❌ Erro ao formatar data/horário:', e.message);
-          mensagemPaciente = 'Desculpe, o formato da data ou horário está inválido. Por favor, use o formato dd/MM/yyyy para data (ex.: 23/07/2025) e HH:mm para horário (ex.: 09:00).';
+          mensagemPaciente = `Desculpe, o formato da data ou horário está inválido. Por favor, use o formato dd/MM/yyyy para data (ex.: 23/07/2025) e HH:mm para horário (ex.: 09:00).${e.message.includes('anterior') ? ' A data deve ser hoje (${hoje}) ou futura.' : ''}`;
         }
       } else {
         console.log('ℹ️ JSON incompleto, aguardando mais dados...');
