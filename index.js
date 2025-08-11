@@ -1,345 +1,422 @@
+/**
+ * BOT DE ATENDIMENTO – UROLOGIA (WhatsApp via Twilio)
+ * Stack: Node.js (CommonJS) + Express + Twilio + Google Calendar + Luxon + Zod + Pino
+ * Deploy: Render.com (Web Service)
+ *
+ * Este arquivo substitui o fluxo anterior controlado 100% por LLM
+ * por uma máquina de estados previsível. A LLM (DeepSeek) é opcional
+ * apenas para "embelezar" as mensagens.
+ *
+ * =====================
+ * COMO USAR
+ * =====================
+ * 1) package.json (exemplo):
+ *    {
+ *      "name": "bot-urologia",
+ *      "version": "1.0.0",
+ *      "main": "index.js",
+ *      "scripts": { "start": "node index.js" },
+ *      "dependencies": {
+ *        "express": "^4.19.2",
+ *        "twilio": "^5.3.6",
+ *        "googleapis": "^133.0.0",
+ *        "luxon": "^3.5.0",
+ *        "zod": "^3.23.8",
+ *        "pino": "^9.3.2",
+ *        "pino-http": "^10.3.0",
+ *        "axios": "^1.7.7"
+ *      }
+ *    }
+ *
+ * 2) Variáveis no Render:
+ *    - (Twilio) TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN
+ *    - (Calendar) GOOGLE_CREDENTIALS (JSON completo) OU GOOGLE_PROJECT_EMAIL + GOOGLE_PRIVATE_KEY
+ *    - (Calendar) GOOGLE_CALENDAR_ID OU CALENDAR_ID
+ *    - (Clínica) CLINIC_TIMEZONE=America/Sao_Paulo, CLINIC_NAME, CLINIC_ADDRESS, CLINIC_PHONE, ACCEPT_HEALTH_PLANS=true
+ *    - (Opcional) DEEPSEEK_API_KEY (para humanizar respostas)
+ *    - NÃO crie variável "port" minúscula. Render injeta PORT.
+ *
+ * 3) Twilio WhatsApp webhook:
+ *    - When a message comes in: https://SEU-SERVICE.onrender.com/whatsapp
+ */
+
+'use strict';
+
 const express = require('express');
-const axios = require('axios');
+const crypto = require('crypto');
 const { google } = require('googleapis');
-const { MessagingResponse } = require('twilio').twiml;
-const { parse, format, addDays, nextWednesday } = require('date-fns');
-require('dotenv').config();
+const { DateTime } = require('luxon');
+const { z } = require('zod');
+const pino = require('pino');
+const pinoHttp = require('pino-http');
+const { twiml: { MessagingResponse } } = require('twilio');
+const axios = require('axios');
 
+// =====================
+// APP & LOGS
+// =====================
 const app = express();
-app.use(express.urlencoded({ extended: false }));
+app.use(express.urlencoded({ extended: false })); // Twilio envia x-www-form-urlencoded
+app.use(express.json());
 
-// Verificar variáveis de ambiente
-const requiredEnvVars = ['DEEPSEEK_API_KEY', 'GOOGLE_CREDENTIALS', 'CALENDAR_ID'];
-let envError = null;
-requiredEnvVars.forEach((envVar) => {
-  if (!process.env[envVar]) {
-    envError = `❌ Variável de ambiente ${envVar} não definida.`;
-    console.error(envError);
+const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
+app.use(pinoHttp({ logger }));
+
+const TZ = process.env.CLINIC_TIMEZONE || 'America/Sao_Paulo';
+const CLINIC_NAME = process.env.CLINIC_NAME || 'Clínica de Urologia';
+const CLINIC_ADDRESS = process.env.CLINIC_ADDRESS || 'Endereço não configurado';
+const CLINIC_PHONE = process.env.CLINIC_PHONE || '';
+const ACCEPT_HEALTH_PLANS = String(process.env.ACCEPT_HEALTH_PLANS || 'true') === 'true';
+
+// =====================
+// SESSÃO EM MEMÓRIA (trocar por Redis depois)
+// =====================
+const SESSIONS = new Map();
+function getSession(id) {
+  if (!SESSIONS.has(id)) SESSIONS.set(id, { state: 'welcome', data: {}, updatedAt: Date.now() });
+  return SESSIONS.get(id);
+}
+function setSession(id, session) {
+  session.updatedAt = Date.now();
+  SESSIONS.set(id, session);
+}
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of SESSIONS.entries()) {
+    if (now - v.updatedAt > 1000 * 60 * 60 * 6) SESSIONS.delete(k); // 6h
   }
-});
+}, 1000 * 60 * 30);
 
-// Validar GOOGLE_CREDENTIALS
-let googleCredentials;
-try {
-  googleCredentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
-  console.log('🔑 GOOGLE_CREDENTIALS client_email:', googleCredentials.client_email);
-} catch (e) {
-  envError = `❌ Erro ao parsear GOOGLE_CREDENTIALS: ${e.message}`;
-  console.error(envError);
+// =====================
+// GOOGLE CALENDAR
+// =====================
+function googleClient() {
+  let email, key;
+  if (process.env.GOOGLE_CREDENTIALS) {
+    try {
+      const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+      email = creds.client_email || creds.email;
+      key = (creds.private_key || '').replace(/\\n/g, '\n');
+    } catch (e) {
+      throw new Error('GOOGLE_CREDENTIALS inválido: ' + e.message);
+    }
+  } else {
+    email = process.env.GOOGLE_PROJECT_EMAIL;
+    key = (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n');
+  }
+  if (!email || !key) throw new Error('Credenciais Google ausentes. Configure GOOGLE_CREDENTIALS ou GOOGLE_PROJECT_EMAIL/GOOGLE_PRIVATE_KEY.');
+  const auth = new google.auth.JWT({ email, key, scopes: ['https://www.googleapis.com/auth/calendar'] });
+  return google.calendar({ version: 'v3', auth });
+}
+function getCalendarId() {
+  return process.env.GOOGLE_CALENDAR_ID || process.env.CALENDAR_ID;
+}
+async function isFreeSlot(calendarId, startISO, endISO) {
+  const calendar = googleClient();
+  const resp = await calendar.freebusy.query({
+    requestBody: { timeMin: startISO, timeMax: endISO, timeZone: TZ, items: [{ id: calendarId }] },
+  });
+  const busy = resp.data.calendars?.[calendarId]?.busy || [];
+  return busy.length === 0;
+}
+async function createEvent({ calendarId, summary, description, startISO, endISO, dedupeKey, attendeePhone }) {
+  const calendar = googleClient();
+  const eventId = crypto.createHash('sha1').update(dedupeKey).digest('hex').slice(0, 24);
+  try {
+    const existing = await calendar.events.get({ calendarId, eventId });
+    if (existing?.data?.id) return existing.data;
+  } catch (_) {}
+  const event = await calendar.events.insert({
+    calendarId,
+    requestBody: {
+      id: eventId,
+      summary,
+      description,
+      start: { dateTime: startISO, timeZone: TZ },
+      end: { dateTime: endISO, timeZone: TZ },
+      location: CLINIC_ADDRESS,
+      reminders: { useDefault: true },
+      extendedProperties: { private: { attendeePhone: attendeePhone || '' } },
+    },
+  });
+  return event.data;
 }
 
-console.log('📅 CALENDAR_ID:', process.env.CALENDAR_ID);
-console.log('🔐 DEEPSEEK_API_KEY configurada:', !!process.env.DEEPSEEK_API_KEY);
+// =====================
+// SUGESTÃO DE HORÁRIOS
+// =====================
+const ReasonSchema = z.enum([
+  'Consulta',
+  'Vasectomia – avaliação',
+  'Litíase/Rim – avaliação',
+  'HPB/Próstata – avaliação',
+  'Disfunção Erétil – avaliação',
+  'Pediátrica – avaliação',
+]);
 
-if (envError) {
-  console.error('🚫 Servidor não iniciado devido a erros de configuração.');
-  process.exit(1);
+function nextClinicSlots({ dateFrom = DateTime.now().setZone(TZ), durationMin = 30, count = 3 }) {
+  const slots = [];
+  let cursor = dateFrom.plus({ minutes: 15 }).startOf('minute');
+  const endWindow = dateFrom.plus({ days: 14 });
+  while (cursor < endWindow && slots.length < count) {
+    const isWeekday = cursor.weekday <= 5;
+    const inMorning = cursor.hour >= 9 && cursor.hour < 12;
+    const inAfternoon = cursor.hour >= 14 && cursor.hour < 18;
+    if (isWeekday && (inMorning || inAfternoon)) {
+      const start = cursor;
+      const end = cursor.plus({ minutes: durationMin });
+      slots.push({ start, end });
+      cursor = cursor.plus({ minutes: 45 });
+    } else {
+      if (cursor.hour < 9) cursor = cursor.set({ hour: 9, minute: 0 });
+      else if (cursor.hour < 14) cursor = cursor.set({ hour: 14, minute: 0 });
+      else cursor = cursor.plus({ days: 1 }).set({ hour: 9, minute: 0 });
+    }
+  }
+  return slots;
 }
 
-const historicoConversas = {};
+async function suggestFreeSlots({ calendarId, count = 3, durationMin = 30 }) {
+  const candidates = nextClinicSlots({ durationMin, count: count * 4 });
+  const picked = [];
+  for (const c of candidates) {
+    const startISO = c.start.toISO();
+    const endISO = c.end.toISO();
+    /* eslint-disable no-await-in-loop */
+    const free = await isFreeSlot(calendarId, startISO, endISO);
+    if (free) picked.push({ startISO, endISO, label: c.start.setLocale('pt-BR').toFormat("ccc, dd/LL 'às' HH:mm") });
+    if (picked.length >= count) break;
+  }
+  return picked;
+}
 
-// Obter a data atual no formato dd/MM/yyyy
-const hoje = format(new Date(), 'dd/MM/yyyy');
+// =====================
+// TWILIO UTIL
+// =====================
+const twimlMessage = (text) => {
+  const resp = new MessagingResponse();
+  resp.message(text);
+  return resp.toString();
+};
+
+// =====================
+// OPTIONAL: DEEPSEEK PARA HUMANIZAR TEXTO
+// =====================
+async function humanize(text) {
+  if (!process.env.DEEPSEEK_API_KEY) return text;
+  try {
+    const r = await axios.post('https://api.deepseek.com/v1/chat/completions', {
+      model: 'deepseek-chat',
+      messages: [
+        { role: 'system', content: 'Você é um atendente cordial e objetivo. Reescreva a mensagem mantendo o sentido e a brevidade.' },
+        { role: 'user', content: text }
+      ],
+      temperature: 0.4
+    }, {
+      headers: { Authorization: `Bearer ${process.env.DEEPSEEK_API_KEY}` }
+    });
+    return r.data.choices?.[0]?.message?.content?.trim() || text;
+  } catch (_) { return text; }
+}
+
+// =====================
+// FSM (Máquina de Estados)
+// =====================
+function normalizeYesNo(txt) {
+  const t = (txt || '').trim().toLowerCase();
+  if (["sim", "s", "yes", "y", "ok", "claro"].includes(t)) return true;
+  if (["nao", "não", "n", "no"].includes(t)) return false;
+  return null;
+}
+function parseSlotSelection(txt) {
+  const m = String(txt).match(/^(1|2|3)$/);
+  return m ? Number(m[1]) : null;
+}
 
 app.post('/whatsapp', async (req, res) => {
-  const telefone = req.body.From;
-  const msg = req.body && req.body.Body ? req.body.Body.trim() : '';
+  const from = req.body?.From;
+  const body = (req.body?.Body || '').trim();
+  if (!from) return res.status(400).send('Missing From');
 
-  if (!historicoConversas[telefone]) {
-    historicoConversas[telefone] = [
-      {
-        role: 'system',
-        content: `
-Você é um atendente virtual da clínica da Dra. Carolina Figurelli, urologista em Porto Alegre, que atende no Medplex Santana – Rua Gomes Jardim, 201 – sala 1602. Hoje é ${hoje} (quarta-feira).
-
-Inicie a conversa com: "Bem-vindo(a) ao agendamento da Dra. Carolina Figurelli, como posso ajudar?"
-
-Durante a conversa com o paciente, colete:
-- nome_completo (nome completo do paciente, ex.: "João Silva")
-- tipo_atendimento: "convênio" ou "particular"
-- nome_convenio (nome do convênio se tipo_atendimento for "convênio", senão null, ex.: "Unimed")
-- data_preferencial (data no formato exato dd/MM/yyyy, ex.: "23/07/2025")
-- horario_preferencial (horário no formato exato HH:mm, ex.: "09:00")
-
-Instruções:
-1. Pergunte um dado por vez, na ordem: nome, tipo de atendimento, convênio (se necessário), data, horário.
-2. Para a data, priorize entender linguagem natural e converta para dd/MM/yyyy com base na data atual (${hoje}). Aceite expressões como:
-   - "hoje" → "${hoje}"
-   - "amanhã" → "${format(addDays(new Date(), 1), 'dd/MM/yyyy')}"
-   - "quarta da próxima semana" → "${format(nextWednesday(addDays(new Date(), 7)), 'dd/MM/yyyy')}"
-   - "próxima sexta" → próxima sexta-feira após ${hoje}
-   - "daqui a dois dias" → "${format(addDays(new Date(), 2), 'dd/MM/yyyy')}"
-   - "terça" → próxima terça-feira após ${hoje}
-   Valide que a data é igual ou posterior a hoje (${hoje}). Se a data for ambígua (ex.: "quarta" sem especificar qual), pergunte se é a próxima quarta-feira (ex.: "${format(nextWednesday(new Date()), 'dd/MM/yyyy')}") ou peça a data no formato dd/MM/yyyy.
-3. Para o horário, priorize entender linguagem natural e converta para HH:mm. Aceite expressões como:
-   - "9" ou "9h" ou "9:00" → "09:00" (assuma manhã, a menos que especificado)
-   - "15 horas" ou "às 15" → "15:00"
-   - "9 da noite" → "21:00"
-   - "meio-dia" → "12:00"
-   - "cinco da tarde" → "17:00"
-   Se o horário for ambíguo (ex.: "9" ou "9:00" sem "manhã/tarde"), assuma manhã (ex.: "09:00"). Se inválido, pergunte para esclarecer (ex.: "Você quis dizer 05:00 da manhã ou 17:00 da tarde? Ou informe como 'às 9', '15 horas', ou HH:mm.").
-4. Você receberá uma mensagem do sistema com os horários disponíveis para o dia solicitado (ex.: "Horários disponíveis para 30/07/2025: 09:00, 10:00"). OFEREÇA APENAS ESSES HORÁRIOS, até dois por dia. Se a mensagem indicar "nenhum horário disponível", informe que o dia está cheio e peça outra data.
-5. Responda em português do Brasil, com tom profissional, amigável e natural, como um atendente humano.
-6. No final da resposta, retorne SEMPRE um JSON válido com as chaves: {"nome_completo": null, "tipo_atendimento": null, "nome_convenio": null, "data_preferencial": null, "horario_preferencial": null}, preenchendo apenas os dados já coletados. Separe o texto do JSON com "---".
-7. Não inclua nenhum texto ou caracteres adicionais (como "*" ou explicações) após o "---", apenas o JSON.
-
-Exemplo de resposta inicial:
-Bem-vindo(a) ao agendamento da Dra. Carolina Figurelli, como posso ajudar?
----
-{"nome_completo": null, "tipo_atendimento": null, "nome_convenio": null, "data_preferencial": null, "horario_preferencial": null}
-
-Exemplo com dados parciais:
-Olá, Marcelo! Você prefere atendimento particular ou por convênio?
----
-{"nome_completo": "Marcelo Figurelli", "tipo_atendimento": null, "nome_convenio": null, "data_preferencial": null, "horario_preferencial": null}
-
-Exemplo de validação de data:
-Você quis dizer a próxima quarta-feira (${format(nextWednesday(new Date()), 'dd/MM/yyyy')})? Ou informe a data no formato dd/MM/yyyy, como 23/07/2025.
----
-{"nome_completo": "Marcelo Figurelli", "tipo_atendimento": "convênio", "nome_convenio": "Unimed", "data_preferencial": null, "horario_preferencial": null}
-
-Exemplo de oferta de horários:
-Para 30/07/2025, os horários disponíveis são 09:00 e 10:00. Qual você prefere?
----
-{"nome_completo": "Marcelo Figurelli", "tipo_atendimento": "convênio", "nome_convenio": "Unimed", "data_preferencial": "30/07/2025", "horario_preferencial": null}
-        `
-      }
-    ];
-  }
-
-  historicoConversas[telefone].push({ role: 'user', content: msg });
-
-  let mensagemPaciente = '';
-  let dadosJson = {};
+  const phone = String(from);
+  const session = getSession(phone);
+  logger.info({ state: session.state, from: phone, text: body }, 'incoming');
 
   try {
-    // Verificar se a IA está prestes a oferecer horários (após data_preferencial ser preenchida)
-    let horariosDisponiveis = [];
-    const ultimaMensagemIA = historicoConversas[telefone]
-      .filter(m => m.role === 'assistant')
-      .slice(-1)[0]?.content || '';
-    const partesUltimaMensagem = ultimaMensagemIA.split('---');
-    if (partesUltimaMensagem.length > 1) {
-      const jsonStr = partesUltimaMensagem[1].trim().replace(/[\*`]/g, '');
-      try {
-        const dadosTemp = JSON.parse(jsonStr);
-        if (dadosTemp.data_preferencial && !dadosTemp.horario_preferencial) {
-          horariosDisponiveis = await obterHorariosDisponiveis(dadosTemp.data_preferencial);
-          console.log('🕒 Horários disponíveis para', dadosTemp.data_preferencial, ':', horariosDisponiveis);
-          historicoConversas[telefone].push({
-            role: 'system',
-            content: `Horários disponíveis para ${dadosTemp.data_preferencial}: ${horariosDisponiveis.length > 0 ? horariosDisponiveis.join(', ') : 'nenhum horário disponível'}. Ofereça apenas esses horários ou informe que o dia está cheio.`
-          });
-        }
-      } catch (e) {
-        console.error('❌ Erro ao parsear JSON da última mensagem:', e.message);
-      }
+    if (body.toLowerCase() === 'menu' || body.toLowerCase() === 'reiniciar') {
+      setSession(phone, { state: 'welcome', data: {} });
     }
 
-    const resp = await axios.post(
-      'https://api.deepseek.com/v1/chat/completions',
-      {
-        model: 'deepseek-chat',
-        messages: historicoConversas[telefone],
-        temperature: 0.6 // Reduzido para maior precisão
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.DEEPSEEK_API_KEY}`,
-          'Content-Type': 'application/json'
-        }
-      }
-    );
-
-    const respostaIA = resp.data.choices[0].message.content;
-    historicoConversas[telefone].push({ role: 'assistant', content: respostaIA });
-
-    try {
-      const partes = respostaIA.split('---');
-      mensagemPaciente = partes[0]?.trim() || 'Sem mensagem de resposta';
-      if (partes.length > 1 && partes[1].trim()) {
-        const jsonStr = partes[1].trim().replace(/[\*`]/g, '');
-        try {
-          dadosJson = JSON.parse(jsonStr);
-          console.log('📥 Mensagem do usuário:', msg);
-          console.log('📦 JSON recebido:', dadosJson);
-        } catch (e) {
-          console.error('❌ Erro ao parsear JSON:', e.message, 'JSON bruto:', jsonStr);
-          mensagemPaciente = 'Desculpe, houve um problema ao processar sua solicitação. Por favor, forneça os dados no formato correto.';
-        }
-      } else {
-        console.log('ℹ️ JSON não encontrado na resposta');
-        mensagemPaciente = 'Desculpe, por favor forneça os dados no formato correto.';
-      }
-
-      if (
-        dadosJson.nome_completo &&
-        dadosJson.data_preferencial &&
-        dadosJson.horario_preferencial
-      ) {
-        try {
-          const dataParsed = parse(dadosJson.data_preferencial, 'dd/MM/yyyy', new Date());
-          const horarioParsed = parse(dadosJson.horario_preferencial, 'HH:mm', new Date());
-          if (isNaN(dataParsed.getTime()) || isNaN(horarioParsed.getTime())) {
-            throw new Error('Data ou horário inválido');
-          }
-          // Validar se a data é igual ou posterior à data atual
-          const hojeParsed = parse(hoje, 'dd/MM/yyyy', new Date());
-          if (dataParsed < hojeParsed) {
-            throw new Error('Data anterior ao dia atual');
-          }
-          const dadosFormatados = {
-            nome: dadosJson.nome_completo,
-            tipo_atendimento: dadosJson.tipo_atendimento,
-            convenio: dadosJson.nome_convenio,
-            data: format(dataParsed, 'yyyy-MM-dd'),
-            horario: format(horarioParsed, 'HH:mm')
-          };
-
-          // Verificar disponibilidade antes de agendar
-          const isDisponivel = await verificarDisponibilidade(dadosFormatados);
-          if (!isDisponivel) {
-            horariosDisponiveis = await obterHorariosDisponiveis(dadosJson.data_preferencial);
-            console.log('🕒 Novos horários disponíveis para', dadosJson.data_preferencial, ':', horariosDisponiveis);
-            historicoConversas[telefone] = historicoConversas[telefone].slice(0, -2); // Remove última mensagem do usuário e resposta da IA
-            historicoConversas[telefone].push({
-              role: 'system',
-              content: `Horários disponíveis para ${dadosJson.data_preferencial}: ${horariosDisponiveis.length > 0 ? horariosDisponiveis.join(', ') : 'nenhum horário disponível'}. Ofereça apenas esses horários ou informe que o dia está cheio.`
-            });
-            throw new Error(`Horário ${dadosJson.horario_preferencial} já ocupado`);
-          }
-
-          console.log('📤 Agendando com:', dadosFormatados);
-          await agendarConsultaGoogleCalendar(dadosFormatados);
-          mensagemPaciente += '\n\n✅ Consulta agendada com sucesso!';
-          // Limpar histórico após agendamento bem-sucedido
-          delete historicoConversas[telefone];
-        } catch (e) {
-          console.error('❌ Erro ao formatar ou agendar:', e.message);
-          mensagemPaciente = `Desculpe, não consegui agendar a consulta. ${
-            e.message.includes('Horário já ocupado')
-              ? `O horário ${dadosJson.horario_preferencial} em ${dadosJson.data_preferencial} já está ocupado. Os horários disponíveis são: ${horariosDisponiveis.length > 0 ? horariosDisponiveis.join(', ') : 'nenhum horário disponível neste dia'}. Qual você prefere?`
-              : `Por favor, use termos como "amanhã", "quarta da próxima semana", "às 9", ou os formatos dd/MM/yyyy (ex.: 23/07/2025) e HH:mm (ex.: 09:00).${e.message.includes('anterior') ? ` A data deve ser hoje (${hoje}) ou futura.` : ''}`
-          }`;
-        }
-      } else {
-        console.log('ℹ️ JSON incompleto, aguardando mais dados...');
-      }
-    } catch (e) {
-      console.error('❌ Erro ao interpretar JSON:', e.message);
-      mensagemPaciente = 'Desculpe, houve um problema ao processar sua solicitação. Por favor, forneça os dados no formato correto.';
+    if (session.state === 'welcome') {
+      const greet = `Olá! Você está falando com o assistente da ${CLINIC_NAME}.\n`+
+        `Endereço: ${CLINIC_ADDRESS}.\n`+
+        (CLINIC_PHONE ? `Telefone: ${CLINIC_PHONE}.\n` : '') +
+        `Posso ajudar a agendar uma consulta? (responda Sim ou Não)`;
+      session.state = 'ask_continue';
+      setSession(phone, session);
+      res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize(greet)));
+      return;
     }
+
+    if (session.state === 'ask_continue') {
+      const yes = normalizeYesNo(body);
+      if (yes === true) {
+        if (ACCEPT_HEALTH_PLANS) {
+          session.state = 'ask_insurance';
+          setSession(phone, session);
+          res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('O atendimento será por convênio (plano de saúde) ou particular?')));
+        } else {
+          session.state = 'ask_reason';
+          setSession(phone, session);
+          res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Certo! Qual o motivo da consulta? (Ex.: Consulta, Vasectomia – avaliação, HPB/Próstata – avaliação, etc.)')));
+        }
+        return;
+      }
+      if (yes === false) {
+        res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Sem problemas! Se precisar, envie "menu" para recomeçar.')));
+        setSession(phone, { state: 'welcome', data: {} });
+        return;
+      }
+      res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Não entendi. Responda com Sim ou Não, por favor.')));
+      return;
+    }
+
+    if (session.state === 'ask_insurance') {
+      const t = body.toLowerCase();
+      if (t.includes('particular')) {
+        session.data.billing = { mode: 'particular' };
+        session.state = 'ask_reason';
+        setSession(phone, session);
+        res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Perfeito. Qual o motivo da consulta?')));
+        return;
+      }
+      if (t.includes('convenio') || t.includes('convênio') || t.includes('plano')) {
+        session.data.billing = { mode: 'convenio' };
+        session.state = 'ask_plan_name';
+        setSession(phone, session);
+        res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Qual o nome do seu plano de saúde?')));
+        return;
+      }
+      res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Por favor, responda "particular" ou "convênio".')));
+      return;
+    }
+
+    if (session.state === 'ask_plan_name') {
+      session.data.planName = body;
+      session.state = 'ask_reason';
+      setSession(phone, session);
+      res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Obrigado! Qual o motivo da consulta?')));
+      return;
+    }
+
+    if (session.state === 'ask_reason') {
+      const reason = body.trim();
+      const parsed = ReasonSchema.safeParse(reason);
+      session.data.reason = parsed.success ? parsed.data : reason;
+      session.state = 'propose_slots';
+      setSession(phone, session);
+
+      const calendarId = getCalendarId();
+      const suggestions = await suggestFreeSlots({ calendarId, count: 3, durationMin: 30 });
+      if (suggestions.length === 0) {
+        res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Não encontrei horários livres nos próximos dias. Pode me dizer um dia e horário preferidos?')));
+        return;
+      }
+      session.data.suggestions = suggestions;
+      setSession(phone, session);
+      const msg = [
+        'Tenho estes horários:',
+        ...suggestions.map((s, i) => `${i + 1}) ${s.label}`),
+        'Responda com 1, 2 ou 3 para escolher.',
+      ].join('\n');
+      res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize(msg)));
+      return;
+    }
+
+    if (session.state === 'propose_slots') {
+      const pick = parseSlotSelection(body);
+      const list = session.data.suggestions || [];
+      if (!pick || !list[pick - 1]) {
+        res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Por favor, escolha 1, 2 ou 3.')));
+        return;
+      }
+      const chosen = list[pick - 1];
+      session.data.chosen = chosen;
+      session.state = 'confirm_slot';
+      setSession(phone, session);
+      res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize(`Você confirma ${chosen.label}? (Sim/Não)`)));
+      return;
+    }
+
+    if (session.state === 'confirm_slot') {
+      const yes = normalizeYesNo(body);
+      if (yes === true) {
+        const calendarId = getCalendarId();
+        const { startISO, endISO } = session.data.chosen;
+        const summary = `${session.data.reason} – ${CLINIC_NAME}`;
+        const descriptionParts = [ `Origem: WhatsApp`, `Telefone: ${phone}` ];
+        if (session.data.billing?.mode === 'convenio') descriptionParts.push(`Convênio: ${session.data.planName || ''}`);
+        const description = descriptionParts.join('\n');
+        const dedupeKey = `${phone}|${startISO}|${endISO}`;
+
+        const stillFree = await isFreeSlot(calendarId, startISO, endISO);
+        if (!stillFree) {
+          session.state = 'ask_reason';
+          setSession(phone, session);
+          res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Poxa, esse horário acabou de ser ocupado. Vamos tentar outro. Qual o motivo da consulta mesmo?')));
+          return;
+        }
+
+        const event = await createEvent({
+          calendarId,
+          summary,
+          description,
+          startISO,
+          endISO,
+          dedupeKey,
+          attendeePhone: phone,
+        });
+
+        session.state = 'booked';
+        session.data.eventId = event.id;
+        setSession(phone, session);
+
+        const when = DateTime.fromISO(startISO).setZone(TZ).setLocale('pt-BR').toFormat("cccc, dd 'de' LLLL 'às' HH:mm");
+        const done = `Agendamento confirmado para ${when}.\n`+
+          `${CLINIC_NAME}\n${CLINIC_ADDRESS}\n`+
+          (CLINIC_PHONE ? `Dúvidas: ${CLINIC_PHONE}\n` : '')+
+          'Se precisar remarcar, responda "menu" para recomeçar.';
+        res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize(done)));
+        return;
+      }
+      if (yes === false) {
+        session.state = 'ask_reason';
+        setSession(phone, session);
+        res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Sem problemas. Qual o motivo da consulta?')));
+        return;
+      }
+      res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Responda com Sim ou Não, por favor.')));
+      return;
+    }
+
+    if (session.state === 'booked') {
+      res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Você já tem um agendamento. Envie "menu" para iniciar um novo fluxo.')));
+      return;
+    }
+
+    // fallback
+    res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Desculpe, não entendi. Envie "menu" para recomeçar.')));
   } catch (err) {
-    console.error('❌ DeepSeek Error:', err.message);
-    mensagemPaciente = 'Desculpe, ocorreu um erro ao tentar responder. Pode tentar de novo?';
+    logger.error({ err }, 'handler error');
+    res.set('Content-Type', 'text/xml').send(twimlMessage('Tive um erro aqui do meu lado. Pode enviar "menu" para recomeçar?'));
   }
-
-  const twiml = new MessagingResponse();
-  twiml.message(mensagemPaciente);
-  res.type('text/xml').send(twiml.toString());
 });
 
-const port = process.env.PORT || 3000;
+app.get('/', (_req, res) => {
+  res.status(200).send({ status: 'ok', service: 'bot-urologia', tz: TZ });
+});
+
+const port = process.env.PORT || 3000; // Render injeta PORT
 app.listen(port, () => {
-  console.log(`🟢 Servidor rodando na porta ${port}`);
+  logger.info(`bot-urologia running on port ${port}`);
 });
-
-async function agendarConsultaGoogleCalendar(dados) {
-  const auth = new google.auth.GoogleAuth({
-    credentials: googleCredentials,
-    scopes: ['https://www.googleapis.com/auth/calendar']
-  });
-
-  const calendar = google.calendar({ version: 'v3', auth });
-
-  const startDateTime = new Date(`${dados.data}T${dados.horario}:00-03:00`);
-  const endDateTime = new Date(startDateTime.getTime() + 30 * 60000);
-
-  const evento = {
-    summary: `Consulta: ${dados.nome}`,
-    description: `Atendimento: ${dados.tipo_atendimento}${dados.convenio ? ` - Convênio: ${dados.convenio}` : ''}`,
-    start: { dateTime: startDateTime.toISOString(), timeZone: 'America/Sao_Paulo' },
-    end: { dateTime: endDateTime.toISOString(), timeZone: 'America/Sao_Paulo' }
-  };
-
-  try {
-    console.log('📅 Evento a ser criado:', JSON.stringify(evento, null, 2));
-    await calendar.events.insert({
-      calendarId: process.env.CALENDAR_ID,
-      resource: evento
-    });
-    console.log('✅ Consulta agendada com sucesso!');
-  } catch (err) {
-    console.error('❌ Erro ao agendar no Google Calendar:', err.message);
-    throw err;
-  }
-}
-
-async function verificarDisponibilidade(dados) {
-  const auth = new google.auth.GoogleAuth({
-    credentials: googleCredentials,
-    scopes: ['https://www.googleapis.com/auth/calendar']
-  });
-
-  const calendar = google.calendar({ version: 'v3', auth });
-
-  const startDateTime = new Date(`${dados.data}T${dados.horario}:00-03:00`);
-  const endDateTime = new Date(startDateTime.getTime() + 30 * 60000);
-
-  try {
-    const eventos = await calendar.events.list({
-      calendarId: process.env.CALENDAR_ID,
-      timeMin: startDateTime.toISOString(),
-      timeMax: endDateTime.toISOString(),
-      timeZone: 'America/Sao_Paulo'
-    });
-    return eventos.data.items.length === 0;
-  } catch (err) {
-    console.error('❌ Erro ao verificar disponibilidade:', err.message);
-    throw err;
-  }
-}
-
-async function obterHorariosDisponiveis(data) {
-  const auth = new google.auth.GoogleAuth({
-    credentials: googleCredentials,
-    scopes: ['https://www.googleapis.com/auth/calendar']
-  });
-
-  const calendar = google.calendar({ version: 'v3', auth });
-
-  const dataParsed = parse(data, 'dd/MM/yyyy', new Date());
-  if (isNaN(dataParsed.getTime())) {
-    throw new Error('Data inválida para verificar horários');
-  }
-
-  const startOfDay = new Date(dataParsed.setHours(0, 0, 0, 0));
-  const endOfDay = new Date(dataParsed.setHours(23, 59, 59, 999));
-
-  // Lista de horários possíveis (das 8h às 18h, a cada 30 minutos)
-  const horariosPossiveis = [];
-  for (let hora = 8; hora <= 18; hora++) {
-    horariosPossiveis.push(`${hora.toString().padStart(2, '0')}:00`);
-    if (hora < 18) horariosPossiveis.push(`${hora.toString().padStart(2, '0')}:30`);
-  }
-
-  try {
-    const eventos = await calendar.events.list({
-      calendarId: process.env.CALENDAR_ID,
-      timeMin: startOfDay.toISOString(),
-      timeMax: endOfDay.toISOString(),
-      timeZone: 'America/Sao_Paulo'
-    });
-
-    const horariosOcupados = eventos.data.items.map(evento => {
-      const start = new Date(evento.start.dateTime);
-      return format(start, 'HH:mm');
-    });
-
-    const horariosLivres = horariosPossiveis.filter(horario => !horariosOcupados.includes(horario));
-    return horariosLivres.slice(0, 2); // Retorna até 2 horários disponíveis
-  } catch (err) {
-    console.error('❌ Erro ao obter horários disponíveis:', err.message);
-    return [];
-  }
-}
