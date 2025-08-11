@@ -267,72 +267,11 @@ ${CLINIC_ADDRESS}`;
       const count = incConfused(session, phone);
       let msg = 'Certo, é por convênio ou particular?';
       if (count >= 2) msg += CLINIC_PHONE ? `
-Se preferir, posso te colocar com nossa equipe: ${CLINIC_PHONE}.` : '
-Se preferir, posso te colocar com nossa equipe humana.';
-      res.set('Content-Type','text/xml').send(twimlMessage(await humanize(msg)));
-      return;
-    }
-    }
-
-    if (session.state === 'ask_plan_name') { session.data.planName = body.trim(); session.state='ask_reason'; setSession(phone, session); res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Obrigado! Qual o motivo da consulta? Se já tiver um dia em mente, pode me dizer.'))); return; }
-
-    if (session.state === 'ask_reason') {
-      const reason = body.trim(); const parsed = ReasonSchema.safeParse(reason); session.data.reason = parsed.success ? parsed.data : reason; session.state = 'propose_slots'; setSession(phone, session);
-      const preferred = parsePreferredDate(body);
-      const calendarId = getCalendarId();
-      const isIpePlan = session.data.billing?.mode === 'convenio' && isIpe(session.data.planName);
-      let suggestions = [];
-      let info = null;
-      if (isIpePlan) {
-        const minIpe = DateTime.now().setZone(TZ).plus({ weeks: 2 }).startOf('day').set({ hour: 9, minute: 0 });
-        if (preferred) {
-          const base = preferred < minIpe ? minIpe : preferred;
-          if (preferred < minIpe) info = `Para ${session.data.planName}, podemos agendar a partir de ${minIpe.setLocale('pt-BR').toFormat('dd/LL')}.`;
-          suggestions = await suggestForSpecificDay({ calendarId, date: base, count: 2, durationMin: 15 });
-        } else {
-          info = `Para ${session.data.planName}, os horários começam a partir de ${minIpe.setLocale('pt-BR').toFormat('dd/LL')}.`;
-          suggestions = await suggestFreeSlots({ calendarId, count: 2, durationMin: 15, dateFrom: minIpe });
-        }
-      } else {
-        if (preferred) suggestions = await suggestForSpecificDay({ calendarId, date: preferred, count: 2, durationMin: 15 });
-        else suggestions = await suggestFreeSlots({ calendarId, count: 2, durationMin: 15 });
-      }
-      if (suggestions.length === 0) { res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Não encontrei horários livres agora. Pode me dizer um dia que prefira, tipo “amanhã” ou “próxima quarta”?'))); return; }
-      session.data.suggestions = suggestions; setSession(phone, session);
-      const firstName = (session.data.name || '').split(' ')[0] || '';
-      const lines = [];
-      if (info) lines.push(info);
-      lines.push(firstName ? `${firstName}, encontrei estes horários:` : 'Encontrei estes horários:');
-      lines.push(...suggestions.map((s,i)=> `${i+1}) ${s.label}`));
-      lines.push('Pode escolher 1 ou 2. Se preferir outro dia, diga (ex.: “próxima quarta”).');
-      const msg = lines.join('\n');
-      res.set('Content-Type','text/xml').send(twimlMessage(await humanize(msg))); return;
-    }
-
-    if (session.state === 'propose_slots') {
-      const preferred = parsePreferredDate(body);
-      const isIpePlan = session.data.billing?.mode === 'convenio' && isIpe(session.data.planName);
-      if (preferred) {
-        const calendarId = getCalendarId();
-        let base = preferred;
-        let info = null;
-        if (isIpePlan) {
-          const minIpe = DateTime.now().setZone(TZ).plus({ weeks: 2 }).startOf('day').set({ hour: 9, minute: 0 });
-          if (preferred < minIpe) { base = minIpe; info = `Para ${session.data.planName}, começamos a partir de ${minIpe.setLocale('pt-BR').toFormat('dd/LL')}.`; }
-        }
-        const suggestions = await suggestForSpecificDay({ calendarId, date: base, count: 2, durationMin: 15 });
-        if (suggestions.length === 0) { res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Esse dia está cheio. Podemos tentar outro?'))); return; }
-        session.data.suggestions = suggestions; setSession(phone, session);
-        const msg = [ info ? info : 'Ótimo! Para essa data, tenho:', ...suggestions.map((s,i)=> `${i+1}) ${s.label}`), 'Qual fica melhor? (1 ou 2)' ].join('\n');
-        res.set('Content-Type','text/xml').send(twimlMessage(await humanize(msg))); return;
-      }
-      const pick = parseSlotSelection(body); const list = session.data.suggestions || [];
-      if (!pick || !list[pick - 1]) {
-      const count = incConfused(session, phone);
-      let msg = 'Certo, me diga o número do horário (1 ou 2) ou uma data, tipo “amanhã”/“próxima quarta”.';
+Se preferir, posso te colocar com nossa equipe: ${CLINIC_PHONE}.` : `
+Se preferir, posso te colocar com nossa equipe humana.`;
       if (count >= 2) msg += CLINIC_PHONE ? `
-Se preferir, nossa equipe pode ajudar pelo ${CLINIC_PHONE}.` : '
-Se preferir, posso te encaminhar para nossa equipe humana.';
+Se preferir, nossa equipe pode ajudar pelo ${CLINIC_PHONE}.` : `
+Se preferir, posso te encaminhar para nossa equipe humana.`;
       res.set('Content-Type','text/xml').send(twimlMessage(await humanize(msg)));
       return;
     }
@@ -369,8 +308,8 @@ Se precisar remarcar, é só escrever “menu”.`;
     const count = incConfused(session, phone);
     let fb = 'Desculpe, não entendi. Podemos tentar de novo?';
     if (count >= 2) fb += CLINIC_PHONE ? `
-Se preferir falar com um humano, nossa equipe atende pelo ${CLINIC_PHONE}.` : '
-Se preferir, posso te encaminhar para nossa equipe humana.';
+Se preferir falar com um humano, nossa equipe atende pelo ${CLINIC_PHONE}.` : `
+Se preferir, posso te encaminhar para nossa equipe humana.`;
     res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize(fb)));
   }
   } catch (err) {
