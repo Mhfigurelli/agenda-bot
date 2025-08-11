@@ -92,8 +92,41 @@ const ReasonSchema = z.enum([
   'Consulta', 'Vasectomia – avaliação', 'Litíase/Rim – avaliação', 'HPB/Próstata – avaliação', 'Disfunção Erétil – avaliação', 'Pediátrica – avaliação',
 ]);
 
-function nextClinicSlots({ dateFrom = DateTime.now().setZone(TZ), durationMin = 30, count = 3 }) {
-  const slots = []; let cursor = dateFrom.plus({ minutes: 15 }).startOf('minute'); const endWindow = dateFrom.plus({ days: 14 });
+function isIpe(name = '') {
+  const n = String(name || '').normalize('NFD').replace(/\p{Diacritic}/gu, '');
+  return /(ipe|ipergs)/i.test(n);
+}
+
+function snapToQuarter(dt) {
+  // arredonda pra cima pro próximo múltiplo de 15 minutos
+  const m = dt.minute;
+  const next = Math.ceil(m / 15) * 15;
+  if (next === 60) return dt.plus({ hours: 1 }).set({ minute: 0, second: 0, millisecond: 0 });
+  return dt.set({ minute: next, second: 0, millisecond: 0 });
+}
+
+function nextClinicSlots({ dateFrom = DateTime.now().setZone(TZ), durationMin = 15, count = 2 }) {
+  const slots = [];
+  let cursor = snapToQuarter(dateFrom.set({ second: 0, millisecond: 0 }).plus({ minutes: 1 }));
+  const endWindow = dateFrom.plus({ days: 14 });
+  while (cursor < endWindow && slots.length < count) {
+    const isWeekday = cursor.weekday <= 5;
+    const inMorning = cursor.hour >= 9 && cursor.hour < 12;
+    const inAfternoon = cursor.hour >= 14 && cursor.hour < 18;
+    if (isWeekday && (inMorning || inAfternoon) && [0,15,30,45].includes(cursor.minute)) {
+      const start = cursor;
+      const end = cursor.plus({ minutes: durationMin });
+      slots.push({ start, end });
+      cursor = cursor.plus({ minutes: 15 }); // blocos cheios de 15 em 15
+    } else {
+      if (cursor.hour < 9) cursor = cursor.set({ hour: 9, minute: 0, second: 0, millisecond: 0 });
+      else if (cursor.hour < 14) cursor = cursor.set({ hour: 14, minute: 0, second: 0, millisecond: 0 });
+      else cursor = cursor.plus({ days: 1 }).set({ hour: 9, minute: 0, second: 0, millisecond: 0 });
+      cursor = snapToQuarter(cursor);
+    }
+  }
+  return slots;
+}).startOf('minute'); const endWindow = dateFrom.plus({ days: 14 });
   while (cursor < endWindow && slots.length < count) {
     const isWeekday = cursor.weekday <= 5; const inMorning = cursor.hour >= 9 && cursor.hour < 12; const inAfternoon = cursor.hour >= 14 && cursor.hour < 18;
     if (isWeekday && (inMorning || inAfternoon)) { const start = cursor; const end = cursor.plus({ minutes: durationMin }); slots.push({ start, end }); cursor = cursor.plus({ minutes: 45 }); }
@@ -102,8 +135,18 @@ function nextClinicSlots({ dateFrom = DateTime.now().setZone(TZ), durationMin = 
   return slots;
 }
 
-async function suggestFreeSlots({ calendarId, count = 3, durationMin = 30 }) {
-  const candidates = nextClinicSlots({ durationMin, count: count * 4 });
+async function suggestFreeSlots({ calendarId, count = 2, durationMin = 15, dateFrom = DateTime.now().setZone(TZ) }) {
+  const candidates = nextClinicSlots({ dateFrom, durationMin, count: count * 8 });
+  const picked = [];
+  for (const c of candidates) {
+    const startISO = c.start.toISO(); const endISO = c.end.toISO();
+    // eslint-disable-next-line no-await-in-loop
+    const free = await isFreeSlot(calendarId, startISO, endISO);
+    if (free) picked.push({ startISO, endISO, label: c.start.setLocale('pt-BR').toFormat("ccc, dd/LL 'às' HH:mm") });
+    if (picked.length >= count) break;
+  }
+  return picked;
+});
   const picked = [];
   for (const c of candidates) {
     const startISO = c.start.toISO(); const endISO = c.end.toISO();
@@ -115,9 +158,28 @@ async function suggestFreeSlots({ calendarId, count = 3, durationMin = 30 }) {
   return picked;
 }
 
-async function suggestForSpecificDay({ calendarId, date, count = 3, durationMin = 30 }) {
-  // Gera slots só para o dia pedido
-  const startDay = date.setZone(TZ).startOf('day').set({ hour: 9, minute: 0 });
+async function suggestForSpecificDay({ calendarId, date, count = 2, durationMin = 15 }) {
+  // Gera slots só para o dia pedido em múltiplos de 15 minutos
+  let cursor = snapToQuarter(date.setZone(TZ).startOf('day').set({ hour: 9, minute: 0 }));
+  const endDay = date.setZone(TZ).endOf('day');
+  const picked = [];
+  while (cursor < endDay && picked.length < count) {
+    const inMorning = cursor.hour >= 9 && cursor.hour < 12; const inAfternoon = cursor.hour >= 14 && cursor.hour < 18;
+    if (inMorning || inAfternoon) {
+      const startISO = cursor.toISO(); const endISO = cursor.plus({ minutes: durationMin }).toISO();
+      // eslint-disable-next-line no-await-in-loop
+      const free = await isFreeSlot(calendarId, startISO, endISO);
+      if (free) picked.push({ startISO, endISO, label: cursor.setLocale('pt-BR').toFormat("ccc, dd/LL 'às' HH:mm") });
+      cursor = cursor.plus({ minutes: 15 });
+    } else {
+      if (cursor.hour < 9) cursor = cursor.set({ hour: 9, minute: 0 });
+      else if (cursor.hour < 14) cursor = cursor.set({ hour: 14, minute: 0 });
+      else cursor = cursor.plus({ days: 1 }).set({ hour: 9, minute: 0 });
+      cursor = snapToQuarter(cursor);
+    }
+  }
+  return picked;
+});
   const endDay = date.setZone(TZ).endOf('day');
   const picked = []; let cursor = startDay;
   while (cursor < endDay && picked.length < count) {
@@ -163,11 +225,19 @@ async function humanize(text) { return text; }
 // =====================
 // FSM (Máquina de Estados)
 // =====================
-function parseSlotSelection(txt) { const m = String(txt).match(/^(1|2|3)$/); return m ? Number(m[1]) : null; }
+function parseSlotSelection(txt) { const m = String(txt).match(/^(1|2)$/); return m ? Number(m[1]) : null; }
 
 app.post('/whatsapp', async (req, res) => {
   const from = req.body?.From; const body = (req.body?.Body || '').trim(); if (!from) return res.status(400).send('Missing From');
-  const phone = String(from); const session = getSession(phone); logger.info({ state: session.state, from: phone, text: body }, 'incoming');
+  const phone = String(from); let session = getSession(phone);
+  // Reinício rápido do fluxo (menu, remarcar, etc.)
+  const lower = (body || '').toLowerCase();
+  const restartWords = ['menu','reiniciar','recomeçar','recomecar','começar','comecar','novo','novo atendimento','reagendar','remarcar','cancelar','agendar de novo'];
+  if (restartWords.some(w => lower.includes(w))) {
+    setSession(phone, { state: 'welcome', data: {} });
+    session = getSession(phone); // re-carrega a sessão atualizada
+  }
+  logger.info({ state: session.state, from: phone, text: body }, 'incoming');
 
   try {
     if ([ 'menu', 'reiniciar', 'começar', 'comecar' ].includes(body.toLowerCase())) setSession(phone, { state: 'welcome', data: {} });
@@ -200,26 +270,60 @@ app.post('/whatsapp', async (req, res) => {
       const reason = body.trim(); const parsed = ReasonSchema.safeParse(reason); session.data.reason = parsed.success ? parsed.data : reason; session.state = 'propose_slots'; setSession(phone, session);
       const preferred = parsePreferredDate(body);
       const calendarId = getCalendarId();
-      const suggestions = preferred
-        ? await suggestForSpecificDay({ calendarId, date: preferred, count: 3 })
-        : await suggestFreeSlots({ calendarId, count: 3, durationMin: 30 });
+      const isIpePlan = session.data.billing?.mode === 'convenio' && isIpe(session.data.planName);
+      let suggestions = [];
+      let info = null;
+      if (isIpePlan) {
+        const minIpe = DateTime.now().setZone(TZ).plus({ weeks: 2 }).startOf('day').set({ hour: 9, minute: 0 });
+        if (preferred) {
+          const base = preferred < minIpe ? minIpe : preferred;
+          if (preferred < minIpe) info = `Para ${session.data.planName}, podemos agendar a partir de ${minIpe.setLocale('pt-BR').toFormat('dd/LL')}.`;
+          suggestions = await suggestForSpecificDay({ calendarId, date: base, count: 2, durationMin: 15 });
+        } else {
+          info = `Para ${session.data.planName}, os horários começam a partir de ${minIpe.setLocale('pt-BR').toFormat('dd/LL')}.`;
+          suggestions = await suggestFreeSlots({ calendarId, count: 2, durationMin: 15, dateFrom: minIpe });
+        }
+      } else {
+        if (preferred) suggestions = await suggestForSpecificDay({ calendarId, date: preferred, count: 2, durationMin: 15 });
+        else suggestions = await suggestFreeSlots({ calendarId, count: 2, durationMin: 15 });
+      }
       if (suggestions.length === 0) { res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Não encontrei horários livres agora. Pode me dizer um dia que prefira, tipo “amanhã” ou “próxima quarta”?'))); return; }
       session.data.suggestions = suggestions; setSession(phone, session);
       const firstName = (session.data.name || '').split(' ')[0] || '';
-      const msg = [ firstName ? `${firstName}, ` : '' + 'encontrei estes horários:', ...suggestions.map((s,i)=> `${i+1}) ${s.label}`), 'Pode escolher 1, 2 ou 3. Se preferir outro dia, é só dizer (ex.: “próxima quarta”).' ].join('\n');
+      const lines = [];
+      if (info) lines.push(info);
+      lines.push(firstName ? `${firstName}, encontrei estes horários:` : 'Encontrei estes horários:');
+      lines.push(...suggestions.map((s,i)=> `${i+1}) ${s.label}`));
+      lines.push('Pode escolher 1 ou 2. Se preferir outro dia, diga (ex.: “próxima quarta”).');
+      const msg = lines.join('
+');
       res.set('Content-Type','text/xml').send(twimlMessage(await humanize(msg))); return;
     }
 
     if (session.state === 'propose_slots') {
       const preferred = parsePreferredDate(body);
+      const isIpePlan = session.data.billing?.mode === 'convenio' && isIpe(session.data.planName);
       if (preferred) {
         const calendarId = getCalendarId();
-        const suggestions = await suggestForSpecificDay({ calendarId, date: preferred, count: 3 });
+        let base = preferred;
+        let info = null;
+        if (isIpePlan) {
+          const minIpe = DateTime.now().setZone(TZ).plus({ weeks: 2 }).startOf('day').set({ hour: 9, minute: 0 });
+          if (preferred < minIpe) { base = minIpe; info = `Para ${session.data.planName}, começamos a partir de ${minIpe.setLocale('pt-BR').toFormat('dd/LL')}.`; }
+        }
+        const suggestions = await suggestForSpecificDay({ calendarId, date: base, count: 2, durationMin: 15 });
         if (suggestions.length === 0) { res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Esse dia está cheio. Podemos tentar outro?'))); return; }
         session.data.suggestions = suggestions; setSession(phone, session);
-        const msg = [ 'Ótimo! Para essa data, tenho:', ...suggestions.map((s,i)=> `${i+1}) ${s.label}`), 'Qual fica melhor? (1, 2 ou 3)' ].join('\n');
+        const msg = [ info ? info : 'Ótimo! Para essa data, tenho:', ...suggestions.map((s,i)=> `${i+1}) ${s.label}`), 'Qual fica melhor? (1 ou 2)' ].join('
+');
         res.set('Content-Type','text/xml').send(twimlMessage(await humanize(msg))); return;
       }
+      const pick = parseSlotSelection(body); const list = session.data.suggestions || [];
+      if (!pick || !list[pick - 1]) { res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Certo, me diga o número do horário (1 ou 2) ou uma data, tipo “amanhã”/“próxima quarta”.'))); return; }
+      const chosen = list[pick - 1]; session.data.chosen = chosen; session.state = 'confirm_slot'; setSession(phone, session);
+      const name = (session.data.name || '').split(' ')[0] || '';
+      res.set('Content-Type','text/xml').send(twimlMessage(await humanize(`${name ? name + ', ' : ''}confirmo ${chosen.label}? (Sim/Não)`))); return;
+    }
       const pick = parseSlotSelection(body); const list = session.data.suggestions || [];
       if (!pick || !list[pick - 1]) { res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Certo, me diga o número do horário (1, 2 ou 3) ou uma data, tipo “amanhã”/“próxima quarta”.'))); return; }
       const chosen = list[pick - 1]; session.data.chosen = chosen; session.state = 'confirm_slot'; setSession(phone, session);
@@ -245,7 +349,7 @@ app.post('/whatsapp', async (req, res) => {
       res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Responda com Sim ou Não, por favor.'))); return;
     }
 
-    if (session.state === 'booked') { res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Você já tem um agendamento confirmado. Se quiser iniciar outro, envie “menu”.'))); return; }
+    if (session.state === 'booked') { res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Você já tem um agendamento confirmado. Para iniciar outro ou remarcar, envie “menu” ou escreva “remarcar”.'))); return; }
 
     // fallback
     res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Desculpe, não entendi. Podemos tentar de novo?')));
@@ -259,4 +363,3 @@ app.get('/', (_req, res) => { res.status(200).send({ status: 'ok', service: 'bot
 
 const port = process.env.PORT || 3000; // Render injeta PORT
 app.listen(port, () => { logger.info(`bot-urologia running on port ${port}`); });
-
