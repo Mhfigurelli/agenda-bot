@@ -3,41 +3,8 @@
  * Stack: Node.js (CommonJS) + Express + Twilio + Google Calendar + Luxon + Zod + Pino
  * Deploy: Render.com (Web Service)
  *
- * Este arquivo substitui o fluxo anterior controlado 100% por LLM
- * por uma máquina de estados previsível. A LLM (DeepSeek) é opcional
- * apenas para "embelezar" as mensagens.
- *
- * =====================
- * COMO USAR
- * =====================
- * 1) package.json (exemplo):
- *    {
- *      "name": "bot-urologia",
- *      "version": "1.0.0",
- *      "main": "index.js",
- *      "scripts": { "start": "node index.js" },
- *      "dependencies": {
- *        "express": "^4.19.2",
- *        "twilio": "^5.3.6",
- *        "googleapis": "^133.0.0",
- *        "luxon": "^3.5.0",
- *        "zod": "^3.23.8",
- *        "pino": "^9.3.2",
- *        "pino-http": "^10.3.0",
- *        "axios": "^1.7.7"
- *      }
- *    }
- *
- * 2) Variáveis no Render:
- *    - (Twilio) TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN
- *    - (Calendar) GOOGLE_CREDENTIALS (JSON completo) OU GOOGLE_PROJECT_EMAIL + GOOGLE_PRIVATE_KEY
- *    - (Calendar) GOOGLE_CALENDAR_ID OU CALENDAR_ID
- *    - (Clínica) CLINIC_TIMEZONE=America/Sao_Paulo, CLINIC_NAME, CLINIC_ADDRESS, CLINIC_PHONE, ACCEPT_HEALTH_PLANS=true
- *    - (Opcional) DEEPSEEK_API_KEY (para humanizar respostas)
- *    - NÃO crie variável "port" minúscula. Render injeta PORT.
- *
- * 3) Twilio WhatsApp webhook:
- *    - When a message comes in: https://SEU-SERVICE.onrender.com/whatsapp
+ * Versão focada em tom humano: máquina de estados + humanização opcional via DeepSeek,
+ * coleta do nome, e compreensão de datas naturais ("amanhã", "próxima quarta", etc.).
  */
 
 'use strict';
@@ -63,8 +30,8 @@ const logger = pino({ level: process.env.LOG_LEVEL || 'info' });
 app.use(pinoHttp({ logger }));
 
 const TZ = process.env.CLINIC_TIMEZONE || 'America/Sao_Paulo';
-const CLINIC_NAME = process.env.CLINIC_NAME || 'Clínica de Urologia';
-const CLINIC_ADDRESS = process.env.CLINIC_ADDRESS || 'Endereço não configurado';
+const CLINIC_NAME = process.env.CLINIC_NAME || 'Dra. Carolina Figurelli – Urologia';
+const CLINIC_ADDRESS = process.env.CLINIC_ADDRESS || 'Medplex Santana – R. Gomes Jardim, 201 – sala 1602';
 const CLINIC_PHONE = process.env.CLINIC_PHONE || '';
 const ACCEPT_HEALTH_PLANS = String(process.env.ACCEPT_HEALTH_PLANS || 'true') === 'true';
 
@@ -76,16 +43,8 @@ function getSession(id) {
   if (!SESSIONS.has(id)) SESSIONS.set(id, { state: 'welcome', data: {}, updatedAt: Date.now() });
   return SESSIONS.get(id);
 }
-function setSession(id, session) {
-  session.updatedAt = Date.now();
-  SESSIONS.set(id, session);
-}
-setInterval(() => {
-  const now = Date.now();
-  for (const [k, v] of SESSIONS.entries()) {
-    if (now - v.updatedAt > 1000 * 60 * 60 * 6) SESSIONS.delete(k); // 6h
-  }
-}, 1000 * 60 * 30);
+function setSession(id, session) { session.updatedAt = Date.now(); SESSIONS.set(id, session); }
+setInterval(() => { const now = Date.now(); for (const [k, v] of SESSIONS.entries()) { if (now - v.updatedAt > 1000 * 60 * 60 * 6) SESSIONS.delete(k); } }, 1000 * 60 * 30);
 
 // =====================
 // GOOGLE CALENDAR
@@ -93,39 +52,24 @@ setInterval(() => {
 function googleClient() {
   let email, key;
   if (process.env.GOOGLE_CREDENTIALS) {
-    try {
-      const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS);
-      email = creds.client_email || creds.email;
-      key = (creds.private_key || '').replace(/\\n/g, '\n');
-    } catch (e) {
-      throw new Error('GOOGLE_CREDENTIALS inválido: ' + e.message);
-    }
-  } else {
-    email = process.env.GOOGLE_PROJECT_EMAIL;
-    key = (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n');
-  }
+    try { const creds = JSON.parse(process.env.GOOGLE_CREDENTIALS); email = creds.client_email || creds.email; key = (creds.private_key || '').replace(/\\n/g, '\n'); }
+    catch (e) { throw new Error('GOOGLE_CREDENTIALS inválido: ' + e.message); }
+  } else { email = process.env.GOOGLE_PROJECT_EMAIL; key = (process.env.GOOGLE_PRIVATE_KEY || '').replace(/\\n/g, '\n'); }
   if (!email || !key) throw new Error('Credenciais Google ausentes. Configure GOOGLE_CREDENTIALS ou GOOGLE_PROJECT_EMAIL/GOOGLE_PRIVATE_KEY.');
   const auth = new google.auth.JWT({ email, key, scopes: ['https://www.googleapis.com/auth/calendar'] });
   return google.calendar({ version: 'v3', auth });
 }
-function getCalendarId() {
-  return process.env.GOOGLE_CALENDAR_ID || process.env.CALENDAR_ID;
-}
+function getCalendarId() { return process.env.GOOGLE_CALENDAR_ID || process.env.CALENDAR_ID; }
 async function isFreeSlot(calendarId, startISO, endISO) {
   const calendar = googleClient();
-  const resp = await calendar.freebusy.query({
-    requestBody: { timeMin: startISO, timeMax: endISO, timeZone: TZ, items: [{ id: calendarId }] },
-  });
+  const resp = await calendar.freebusy.query({ requestBody: { timeMin: startISO, timeMax: endISO, timeZone: TZ, items: [{ id: calendarId }] } });
   const busy = resp.data.calendars?.[calendarId]?.busy || [];
   return busy.length === 0;
 }
 async function createEvent({ calendarId, summary, description, startISO, endISO, dedupeKey, attendeePhone }) {
   const calendar = googleClient();
   const eventId = crypto.createHash('sha1').update(dedupeKey).digest('hex').slice(0, 24);
-  try {
-    const existing = await calendar.events.get({ calendarId, eventId });
-    if (existing?.data?.id) return existing.data;
-  } catch (_) {}
+  try { const existing = await calendar.events.get({ calendarId, eventId }); if (existing?.data?.id) return existing.data; } catch (_) {}
   const event = await calendar.events.insert({
     calendarId,
     requestBody: {
@@ -143,35 +87,18 @@ async function createEvent({ calendarId, summary, description, startISO, endISO,
 }
 
 // =====================
-// SUGESTÃO DE HORÁRIOS
+// SLOTS & PARSERS
 // =====================
 const ReasonSchema = z.enum([
-  'Consulta',
-  'Vasectomia – avaliação',
-  'Litíase/Rim – avaliação',
-  'HPB/Próstata – avaliação',
-  'Disfunção Erétil – avaliação',
-  'Pediátrica – avaliação',
+  'Consulta', 'Vasectomia – avaliação', 'Litíase/Rim – avaliação', 'HPB/Próstata – avaliação', 'Disfunção Erétil – avaliação', 'Pediátrica – avaliação',
 ]);
 
 function nextClinicSlots({ dateFrom = DateTime.now().setZone(TZ), durationMin = 30, count = 3 }) {
-  const slots = [];
-  let cursor = dateFrom.plus({ minutes: 15 }).startOf('minute');
-  const endWindow = dateFrom.plus({ days: 14 });
+  const slots = []; let cursor = dateFrom.plus({ minutes: 15 }).startOf('minute'); const endWindow = dateFrom.plus({ days: 14 });
   while (cursor < endWindow && slots.length < count) {
-    const isWeekday = cursor.weekday <= 5;
-    const inMorning = cursor.hour >= 9 && cursor.hour < 12;
-    const inAfternoon = cursor.hour >= 14 && cursor.hour < 18;
-    if (isWeekday && (inMorning || inAfternoon)) {
-      const start = cursor;
-      const end = cursor.plus({ minutes: durationMin });
-      slots.push({ start, end });
-      cursor = cursor.plus({ minutes: 45 });
-    } else {
-      if (cursor.hour < 9) cursor = cursor.set({ hour: 9, minute: 0 });
-      else if (cursor.hour < 14) cursor = cursor.set({ hour: 14, minute: 0 });
-      else cursor = cursor.plus({ days: 1 }).set({ hour: 9, minute: 0 });
-    }
+    const isWeekday = cursor.weekday <= 5; const inMorning = cursor.hour >= 9 && cursor.hour < 12; const inAfternoon = cursor.hour >= 14 && cursor.hour < 18;
+    if (isWeekday && (inMorning || inAfternoon)) { const start = cursor; const end = cursor.plus({ minutes: durationMin }); slots.push({ start, end }); cursor = cursor.plus({ minutes: 45 }); }
+    else { if (cursor.hour < 9) cursor = cursor.set({ hour: 9, minute: 0 }); else if (cursor.hour < 14) cursor = cursor.set({ hour: 14, minute: 0 }); else cursor = cursor.plus({ days: 1 }).set({ hour: 9, minute: 0 }); }
   }
   return slots;
 }
@@ -180,8 +107,7 @@ async function suggestFreeSlots({ calendarId, count = 3, durationMin = 30 }) {
   const candidates = nextClinicSlots({ durationMin, count: count * 4 });
   const picked = [];
   for (const c of candidates) {
-    const startISO = c.start.toISO();
-    const endISO = c.end.toISO();
+    const startISO = c.start.toISO(); const endISO = c.end.toISO();
     /* eslint-disable no-await-in-loop */
     const free = await isFreeSlot(calendarId, startISO, endISO);
     if (free) picked.push({ startISO, endISO, label: c.start.setLocale('pt-BR').toFormat("ccc, dd/LL 'às' HH:mm") });
@@ -190,14 +116,49 @@ async function suggestFreeSlots({ calendarId, count = 3, durationMin = 30 }) {
   return picked;
 }
 
+async function suggestForSpecificDay({ calendarId, date, count = 3, durationMin = 30 }) {
+  // Gera slots só para o dia pedido
+  const startDay = date.setZone(TZ).startOf('day').set({ hour: 9, minute: 0 });
+  const endDay = date.setZone(TZ).endOf('day');
+  const picked = []; let cursor = startDay;
+  while (cursor < endDay && picked.length < count) {
+    const inMorning = cursor.hour >= 9 && cursor.hour < 12; const inAfternoon = cursor.hour >= 14 && cursor.hour < 18;
+    if (inMorning || inAfternoon) {
+      const startISO = cursor.toISO(); const endISO = cursor.plus({ minutes: durationMin }).toISO();
+      // eslint-disable-next-line no-await-in-loop
+      const free = await isFreeSlot(calendarId, startISO, endISO);
+      if (free) picked.push({ startISO, endISO, label: cursor.setLocale('pt-BR').toFormat("ccc, dd/LL 'às' HH:mm") });
+      cursor = cursor.plus({ minutes: 45 });
+    } else {
+      if (cursor.hour < 9) cursor = cursor.set({ hour: 9, minute: 0 }); else if (cursor.hour < 14) cursor = cursor.set({ hour: 14, minute: 0 }); else cursor = cursor.plus({ days: 1 }).set({ hour: 9, minute: 0 });
+    }
+  }
+  return picked;
+}
+
+function parsePreferredDate(text) {
+  if (!text) return null; const t = text.toLowerCase();
+  const now = DateTime.now().setZone(TZ);
+  const weekdays = { 'segunda': 1, 'terca': 2, 'terça': 2, 'quarta': 3, 'quinta': 4, 'sexta': 5 };
+  if (/(hoje)/.test(t)) return now;
+  if (/(amanh[aã])/.test(t)) return now.plus({ days: 1 });
+  const mProx = t.match(/pr[oó]xim[aoa]?\s+(segunda|ter[cç]a|terça|quarta|quinta|sexta)/);
+  if (mProx) { const wd = weekdays[mProx[1].normalize('NFD').replace(/\p{Diacritic}/gu, '')]; return nextWeekday(now, wd); }
+  const mWd = t.match(/\b(segunda|ter[cç]a|terça|quarta|quinta|sexta)\b/);
+  if (mWd) { const wd = weekdays[mWd[1].normalize('NFD').replace(/\p{Diacritic}/gu, '')]; return nextOrSameWeekday(now, wd); }
+  return null;
+}
+function nextOrSameWeekday(from, targetWd) {
+  let d = from; for (let i = 0; i < 7; i++) { if (d.weekday === targetWd && d >= from.startOf('day')) return d; d = d.plus({ days: 1 }); } return null;
+}
+function nextWeekday(from, targetWd) {
+  let d = from.plus({ days: 1 }); for (let i = 0; i < 7; i++) { if (d.weekday === targetWd) return d; d = d.plus({ days: 1 }); } return null;
+}
+
 // =====================
 // TWILIO UTIL
 // =====================
-const twimlMessage = (text) => {
-  const resp = new MessagingResponse();
-  resp.message(text);
-  return resp.toString();
-};
+const twimlMessage = (text) => { const resp = new MessagingResponse(); resp.message(text); return resp.toString(); };
 
 // =====================
 // OPTIONAL: DEEPSEEK PARA HUMANIZAR TEXTO
@@ -208,215 +169,117 @@ async function humanize(text) {
     const r = await axios.post('https://api.deepseek.com/v1/chat/completions', {
       model: 'deepseek-chat',
       messages: [
-        { role: 'system', content: 'Você é um atendente cordial e objetivo. Reescreva a mensagem mantendo o sentido e a brevidade.' },
+        { role: 'system', content: 'Você é uma atendente humana, gentil e objetiva. Reescreva a mensagem com calor humano, sem emojis, mantendo brevidade e clareza.' },
         { role: 'user', content: text }
       ],
-      temperature: 0.4
-    }, {
-      headers: { Authorization: `Bearer ${process.env.DEEPSEEK_API_KEY}` }
-    });
+      temperature: 0.5
+    }, { headers: { Authorization: `Bearer ${process.env.DEEPSEEK_API_KEY}` } });
     return r.data.choices?.[0]?.message?.content?.trim() || text;
   } catch (_) { return text; }
 }
 
 // =====================
-// FSM (Máquina de Estados)
+// FSM (Máquina de Estados) – agora com coleta de nome e datas naturais
 // =====================
-function normalizeYesNo(txt) {
-  const t = (txt || '').trim().toLowerCase();
-  if (["sim", "s", "yes", "y", "ok", "claro"].includes(t)) return true;
-  if (["nao", "não", "n", "no"].includes(t)) return false;
-  return null;
-}
-function parseSlotSelection(txt) {
-  const m = String(txt).match(/^(1|2|3)$/);
-  return m ? Number(m[1]) : null;
-}
+function normalizeYesNo(txt) { const t = (txt || '').trim().toLowerCase(); if (["sim","s","yes","y","ok","claro"].includes(t)) return true; if (["nao","não","n","no"].includes(t)) return false; return null; }
+function parseSlotSelection(txt) { const m = String(txt).match(/^(1|2|3)$/); return m ? Number(m[1]) : null; }
 
 app.post('/whatsapp', async (req, res) => {
-  const from = req.body?.From;
-  const body = (req.body?.Body || '').trim();
-  if (!from) return res.status(400).send('Missing From');
-
-  const phone = String(from);
-  const session = getSession(phone);
-  logger.info({ state: session.state, from: phone, text: body }, 'incoming');
+  const from = req.body?.From; const body = (req.body?.Body || '').trim(); if (!from) return res.status(400).send('Missing From');
+  const phone = String(from); const session = getSession(phone); logger.info({ state: session.state, from: phone, text: body }, 'incoming');
 
   try {
-    if (body.toLowerCase() === 'menu' || body.toLowerCase() === 'reiniciar') {
-      setSession(phone, { state: 'welcome', data: {} });
-    }
+    if ([ 'menu', 'reiniciar', 'começar', 'comecar' ].includes(body.toLowerCase())) setSession(phone, { state: 'welcome', data: {} });
 
     if (session.state === 'welcome') {
-      const greet = `Olá! Você está falando com o assistente da ${CLINIC_NAME}.\n`+
-        `Endereço: ${CLINIC_ADDRESS}.\n`+
-        (CLINIC_PHONE ? `Telefone: ${CLINIC_PHONE}.\n` : '') +
-        `Posso ajudar a agendar uma consulta? (responda Sim ou Não)`;
-      session.state = 'ask_continue';
-      setSession(phone, session);
-      res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize(greet)));
-      return;
+      const greet = `Olá! Eu sou a assistente da ${CLINIC_NAME}.\n${CLINIC_ADDRESS}${CLINIC_PHONE ? `\nTelefone: ${CLINIC_PHONE}` : ''}\nPosso te ajudar a agendar uma consulta?`;
+      session.state = 'ask_continue'; setSession(phone, session);
+      res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize(greet))); return;
     }
 
     if (session.state === 'ask_continue') {
       const yes = normalizeYesNo(body);
-      if (yes === true) {
-        if (ACCEPT_HEALTH_PLANS) {
-          session.state = 'ask_insurance';
-          setSession(phone, session);
-          res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('O atendimento será por convênio (plano de saúde) ou particular?')));
-        } else {
-          session.state = 'ask_reason';
-          setSession(phone, session);
-          res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Certo! Qual o motivo da consulta? (Ex.: Consulta, Vasectomia – avaliação, HPB/Próstata – avaliação, etc.)')));
-        }
-        return;
-      }
-      if (yes === false) {
-        res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Sem problemas! Se precisar, envie "menu" para recomeçar.')));
-        setSession(phone, { state: 'welcome', data: {} });
-        return;
-      }
-      res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Não entendi. Responda com Sim ou Não, por favor.')));
-      return;
+      if (yes === true) { session.state = 'ask_name'; setSession(phone, session); res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Perfeito. Como posso te chamar? (nome e sobrenome)'))); return; }
+      if (yes === false) { res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Sem problema. Quando precisar, é só escrever “menu”.'))); setSession(phone, { state:'welcome', data:{} }); return; }
+      res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Só pra confirmar: gostaria de marcar consulta? (Sim/Não)'))); return;
+    }
+
+    if (session.state === 'ask_name') {
+      const name = body.replace(/[\n\r]/g,' ').trim(); if (name.length < 2) { res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Pode me dizer seu nome completo?'))); return; }
+      session.data.name = name; if (ACCEPT_HEALTH_PLANS) { session.state = 'ask_insurance'; setSession(phone, session); res.set('Content-Type','text/xml').send(twimlMessage(await humanize(`Obrigada, ${name.split(' ')[0]}! O atendimento será por convênio ou particular?`))); return; }
+      session.state = 'ask_reason'; setSession(phone, session); res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Ótimo! Qual o motivo da consulta?'))); return;
     }
 
     if (session.state === 'ask_insurance') {
-      const t = body.toLowerCase();
-      if (t.includes('particular')) {
-        session.data.billing = { mode: 'particular' };
-        session.state = 'ask_reason';
-        setSession(phone, session);
-        res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Perfeito. Qual o motivo da consulta?')));
-        return;
-      }
-      if (t.includes('convenio') || t.includes('convênio') || t.includes('plano')) {
-        session.data.billing = { mode: 'convenio' };
-        session.state = 'ask_plan_name';
-        setSession(phone, session);
-        res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Qual o nome do seu plano de saúde?')));
-        return;
-      }
-      res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Por favor, responda "particular" ou "convênio".')));
-      return;
+      const t = body.toLowerCase(); if (t.includes('particular')) { session.data.billing = { mode:'particular' }; session.state='ask_reason'; setSession(phone, session); res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Perfeito. Qual o motivo da consulta?'))); return; }
+      if (t.includes('convenio') || t.includes('convênio') || t.includes('plano')) { session.data.billing = { mode:'convenio' }; session.state='ask_plan_name'; setSession(phone, session); res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Qual o nome do seu plano?'))); return; }
+      res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Certo, é por convênio ou particular?'))); return;
     }
 
-    if (session.state === 'ask_plan_name') {
-      session.data.planName = body;
-      session.state = 'ask_reason';
-      setSession(phone, session);
-      res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Obrigado! Qual o motivo da consulta?')));
-      return;
-    }
+    if (session.state === 'ask_plan_name') { session.data.planName = body.trim(); session.state='ask_reason'; setSession(phone, session); res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Obrigado! Qual o motivo da consulta?'))); return; }
 
     if (session.state === 'ask_reason') {
-      const reason = body.trim();
-      const parsed = ReasonSchema.safeParse(reason);
-      session.data.reason = parsed.success ? parsed.data : reason;
-      session.state = 'propose_slots';
-      setSession(phone, session);
-
+      const reason = body.trim(); const parsed = ReasonSchema.safeParse(reason); session.data.reason = parsed.success ? parsed.data : reason; session.state = 'propose_slots'; setSession(phone, session);
+      // Se o usuário já indicar uma data natural aqui ("próxima quarta"), privilegiar essa data
+      const preferred = parsePreferredDate(body);
       const calendarId = getCalendarId();
-      const suggestions = await suggestFreeSlots({ calendarId, count: 3, durationMin: 30 });
-      if (suggestions.length === 0) {
-        res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Não encontrei horários livres nos próximos dias. Pode me dizer um dia e horário preferidos?')));
-        return;
-      }
-      session.data.suggestions = suggestions;
-      setSession(phone, session);
-      const msg = [
-        'Tenho estes horários:',
-        ...suggestions.map((s, i) => `${i + 1}) ${s.label}`),
-        'Responda com 1, 2 ou 3 para escolher.',
-      ].join('\n');
-      res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize(msg)));
-      return;
+      const suggestions = preferred
+        ? await suggestForSpecificDay({ calendarId, date: preferred, count: 3 })
+        : await suggestFreeSlots({ calendarId, count: 3, durationMin: 30 });
+      if (suggestions.length === 0) { res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Não encontrei horários livres agora. Pode me dizer um dia que prefira, tipo “amanhã” ou “próxima quarta”?'))); return; }
+      session.data.suggestions = suggestions; setSession(phone, session);
+      const firstName = (session.data.name || '').split(' ')[0] || '';
+      const msg = [ firstName ? `${firstName}, ` : '' + 'encontrei estes horários:', ...suggestions.map((s,i)=> `${i+1}) ${s.label}`), 'Pode escolher 1, 2 ou 3. Se preferir outro dia, é só dizer (ex.: “próxima quarta”).' ].join('\n');
+      res.set('Content-Type','text/xml').send(twimlMessage(await humanize(msg))); return;
     }
 
     if (session.state === 'propose_slots') {
-      const pick = parseSlotSelection(body);
-      const list = session.data.suggestions || [];
-      if (!pick || !list[pick - 1]) {
-        res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Por favor, escolha 1, 2 ou 3.')));
-        return;
+      // Se a pessoa responder com uma data natural, refaça as sugestões para aquele dia
+      const preferred = parsePreferredDate(body);
+      if (preferred) {
+        const calendarId = getCalendarId();
+        const suggestions = await suggestForSpecificDay({ calendarId, date: preferred, count: 3 });
+        if (suggestions.length === 0) { res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Esse dia está cheio. Podemos tentar outro?'))); return; }
+        session.data.suggestions = suggestions; setSession(phone, session);
+        const msg = [ 'Ótimo! Para essa data, tenho:', ...suggestions.map((s,i)=> `${i+1}) ${s.label}`), 'Qual fica melhor? (1, 2 ou 3)' ].join('\n');
+        res.set('Content-Type','text/xml').send(twimlMessage(await humanize(msg))); return;
       }
-      const chosen = list[pick - 1];
-      session.data.chosen = chosen;
-      session.state = 'confirm_slot';
-      setSession(phone, session);
-      res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize(`Você confirma ${chosen.label}? (Sim/Não)`)));
-      return;
+      const pick = parseSlotSelection(body); const list = session.data.suggestions || [];
+      if (!pick || !list[pick - 1]) { res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Certo, me diga o número do horário (1, 2 ou 3) ou uma data, tipo “amanhã”/“próxima quarta”.'))); return; }
+      const chosen = list[pick - 1]; session.data.chosen = chosen; session.state = 'confirm_slot'; setSession(phone, session);
+      const name = (session.data.name || '').split(' ')[0] || '';
+      res.set('Content-Type','text/xml').send(twimlMessage(await humanize(`${name ? name + ', ' : ''}confirmo ${chosen.label}? (Sim/Não)`))); return;
     }
 
     if (session.state === 'confirm_slot') {
       const yes = normalizeYesNo(body);
       if (yes === true) {
-        const calendarId = getCalendarId();
-        const { startISO, endISO } = session.data.chosen;
-        const summary = `${session.data.reason} – ${CLINIC_NAME}`;
-        const descriptionParts = [ `Origem: WhatsApp`, `Telefone: ${phone}` ];
-        if (session.data.billing?.mode === 'convenio') descriptionParts.push(`Convênio: ${session.data.planName || ''}`);
-        const description = descriptionParts.join('\n');
-        const dedupeKey = `${phone}|${startISO}|${endISO}`;
-
+        const calendarId = getCalendarId(); const { startISO, endISO } = session.data.chosen; const summary = `${session.data.reason} – ${CLINIC_NAME}`;
+        const descriptionParts = [ `Origem: WhatsApp`, `Telefone: ${phone}`, `Paciente: ${session.data.name || ''}` ]; if (session.data.billing?.mode === 'convenio') descriptionParts.push(`Convênio: ${session.data.planName || ''}`);
+        const description = descriptionParts.join('\n'); const dedupeKey = `${phone}|${startISO}|${endISO}`;
         const stillFree = await isFreeSlot(calendarId, startISO, endISO);
-        if (!stillFree) {
-          session.state = 'ask_reason';
-          setSession(phone, session);
-          res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Poxa, esse horário acabou de ser ocupado. Vamos tentar outro. Qual o motivo da consulta mesmo?')));
-          return;
-        }
-
-        const event = await createEvent({
-          calendarId,
-          summary,
-          description,
-          startISO,
-          endISO,
-          dedupeKey,
-          attendeePhone: phone,
-        });
-
-        session.state = 'booked';
-        session.data.eventId = event.id;
-        setSession(phone, session);
-
+        if (!stillFree) { session.state = 'ask_reason'; setSession(phone, session); res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Esse horário acabou de ficar indisponível. Me diga o motivo da consulta e eu te ofereço novas opções, tudo bem?'))); return; }
+        const event = await createEvent({ calendarId, summary, description, startISO, endISO, dedupeKey, attendeePhone: phone });
+        session.state = 'booked'; session.data.eventId = event.id; setSession(phone, session);
         const when = DateTime.fromISO(startISO).setZone(TZ).setLocale('pt-BR').toFormat("cccc, dd 'de' LLLL 'às' HH:mm");
-        const done = `Agendamento confirmado para ${when}.\n`+
-          `${CLINIC_NAME}\n${CLINIC_ADDRESS}\n`+
-          (CLINIC_PHONE ? `Dúvidas: ${CLINIC_PHONE}\n` : '')+
-          'Se precisar remarcar, responda "menu" para recomeçar.';
-        res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize(done)));
-        return;
+        const done = `Perfeito, ficou agendado para ${when}.\n${CLINIC_NAME}\n${CLINIC_ADDRESS}${CLINIC_PHONE ? `\nDúvidas: ${CLINIC_PHONE}` : ''}\nSe precisar remarcar, é só escrever “menu”.`;
+        res.set('Content-Type','text/xml').send(twimlMessage(await humanize(done))); return;
       }
-      if (yes === false) {
-        session.state = 'ask_reason';
-        setSession(phone, session);
-        res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Sem problemas. Qual o motivo da consulta?')));
-        return;
-      }
-      res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Responda com Sim ou Não, por favor.')));
-      return;
+      if (yes === false) { session.state = 'ask_reason'; setSession(phone, session); res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Sem problema. Qual o motivo da consulta e qual dia você prefere?'))); return; }
+      res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Responda com Sim ou Não, por favor.'))); return;
     }
 
-    if (session.state === 'booked') {
-      res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Você já tem um agendamento. Envie "menu" para iniciar um novo fluxo.')));
-      return;
-    }
+    if (session.state === 'booked') { res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Você já tem um agendamento confirmado. Se quiser iniciar outro, envie “menu”.'))); return; }
 
     // fallback
-    res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Desculpe, não entendi. Envie "menu" para recomeçar.')));
+    res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Desculpe, não entendi. Podemos tentar de novo?')));
   } catch (err) {
     logger.error({ err }, 'handler error');
     res.set('Content-Type', 'text/xml').send(twimlMessage('Tive um erro aqui do meu lado. Pode enviar "menu" para recomeçar?'));
   }
 });
 
-app.get('/', (_req, res) => {
-  res.status(200).send({ status: 'ok', service: 'bot-urologia', tz: TZ });
-});
+app.get('/', (_req, res) => { res.status(200).send({ status: 'ok', service: 'bot-urologia', tz: TZ }); });
 
 const port = process.env.PORT || 3000; // Render injeta PORT
-app.listen(port, () => {
-  logger.info(`bot-urologia running on port ${port}`);
-});
+app.listen(port, () => { logger.info(`bot-urologia running on port ${port}`); });
