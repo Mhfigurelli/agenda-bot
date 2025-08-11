@@ -194,13 +194,30 @@ function nextWeekday(from, targetWd) { let d = from.plus({ days: 1 }); for (let 
 
 // =====================
 // TWILIO UTIL
-// =====================
 const twimlMessage = (text) => { const resp = new MessagingResponse(); resp.message(text); return resp.toString(); };
 
 // =====================
 // HUMANIZE (NO-OP) – DESATIVADA
 // =====================
 async function humanize(text) { return text; }
+
+// =====================
+// ESCALATION / HUMANO
+// =====================
+function wantsHuman(text) {
+  const t = (text || '').toLowerCase();
+  return /(humano|atendente|pessoa|secretaria|recep[cç][aã]o|telefone|ligar|whatsapp|falar com|suporte)/i.test(t);
+}
+function incConfused(session, phone) {
+  session.data.confusedCount = (session.data.confusedCount || 0) + 1;
+  setSession(phone, session);
+  return session.data.confusedCount;
+}
+function humanHandoffMessage() {
+  return CLINIC_PHONE
+    ? `Sem problemas! Você pode falar com nossa equipe humana pelo ${CLINIC_PHONE}.`
+    : 'Sem problemas! Posso pedir para nossa equipe humana entrar em contato.';
+}
 
 // =====================
 // FSM (Máquina de Estados)
@@ -219,9 +236,16 @@ app.post('/whatsapp', async (req, res) => {
   }
   logger.info({ state: session.state, from: phone, text: body }, 'incoming');
 
+  // Se o usuário pedir humano explicitamente
+  if (wantsHuman(body)) {
+    res.set('Content-Type','text/xml').send(twimlMessage(humanHandoffMessage()));
+    return;
+  }
+
   try {
     if (session.state === 'welcome') {
-      const greet = `Olá! Eu sou a assistente da ${CLINIC_NAME}.\n${CLINIC_ADDRESS}${CLINIC_PHONE ? `\nTelefone: ${CLINIC_PHONE}` : ''}`;
+      const greet = `Olá! Eu sou a assistente da ${CLINIC_NAME}.
+${CLINIC_ADDRESS}`;
       session.state = 'ask_name';
       setSession(phone, session);
       const ask = await humanize(greet + '\nComo posso te chamar? (nome e sobrenome)');
@@ -239,7 +263,15 @@ app.post('/whatsapp', async (req, res) => {
       const t = body.toLowerCase();
       if (t.includes('particular')) { session.data.billing = { mode:'particular' }; session.state='ask_reason'; setSession(phone, session); res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Perfeito. Qual o motivo da consulta? Se quiser, já diga um dia (ex.: “próxima quarta”).'))); return; }
       if (t.includes('convenio') || t.includes('convênio') || t.includes('plano')) { session.data.billing = { mode:'convenio' }; session.state='ask_plan_name'; setSession(phone, session); res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Qual é o nome do seu plano?'))); return; }
-      res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Certo, é por convênio ou particular?'))); return;
+      {
+      const count = incConfused(session, phone);
+      let msg = 'Certo, é por convênio ou particular?';
+      if (count >= 2) msg += CLINIC_PHONE ? `
+Se preferir, posso te colocar com nossa equipe: ${CLINIC_PHONE}.` : '
+Se preferir, posso te colocar com nossa equipe humana.';
+      res.set('Content-Type','text/xml').send(twimlMessage(await humanize(msg)));
+      return;
+    }
     }
 
     if (session.state === 'ask_plan_name') { session.data.planName = body.trim(); session.state='ask_reason'; setSession(phone, session); res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Obrigado! Qual o motivo da consulta? Se já tiver um dia em mente, pode me dizer.'))); return; }
@@ -295,7 +327,15 @@ app.post('/whatsapp', async (req, res) => {
         res.set('Content-Type','text/xml').send(twimlMessage(await humanize(msg))); return;
       }
       const pick = parseSlotSelection(body); const list = session.data.suggestions || [];
-      if (!pick || !list[pick - 1]) { res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Certo, me diga o número do horário (1 ou 2) ou uma data, tipo “amanhã”/“próxima quarta”.'))); return; }
+      if (!pick || !list[pick - 1]) {
+      const count = incConfused(session, phone);
+      let msg = 'Certo, me diga o número do horário (1 ou 2) ou uma data, tipo “amanhã”/“próxima quarta”.';
+      if (count >= 2) msg += CLINIC_PHONE ? `
+Se preferir, nossa equipe pode ajudar pelo ${CLINIC_PHONE}.` : '
+Se preferir, posso te encaminhar para nossa equipe humana.';
+      res.set('Content-Type','text/xml').send(twimlMessage(await humanize(msg)));
+      return;
+    }
       const chosen = list[pick - 1]; session.data.chosen = chosen; session.state = 'confirm_slot'; setSession(phone, session);
       const name = (session.data.name || '').split(' ')[0] || '';
       res.set('Content-Type','text/xml').send(twimlMessage(await humanize(`${name ? name + ', ' : ''}confirmo ${chosen.label}? (Sim/Não)`))); return;
@@ -312,7 +352,10 @@ app.post('/whatsapp', async (req, res) => {
         const event = await createEvent({ calendarId, summary, description, startISO, endISO, dedupeKey, attendeePhone: phone });
         session.state = 'booked'; session.data.eventId = event.id; setSession(phone, session);
         const when = DateTime.fromISO(startISO).setZone(TZ).setLocale('pt-BR').toFormat("cccc, dd 'de' LLLL 'às' HH:mm");
-        const done = `Perfeito, ficou agendado para ${when}.\n${CLINIC_NAME}\n${CLINIC_ADDRESS}${CLINIC_PHONE ? `\nDúvidas: ${CLINIC_PHONE}` : ''}\nSe precisar remarcar, é só escrever “menu”.`;
+        const done = `Perfeito, ficou agendado para ${when}.
+${CLINIC_NAME}
+${CLINIC_ADDRESS}
+Se precisar remarcar, é só escrever “menu”.`;
         res.set('Content-Type','text/xml').send(twimlMessage(await humanize(done))); return;
       }
       if (no) { session.state = 'ask_reason'; setSession(phone, session); res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Sem problema. Qual o motivo da consulta e qual dia você prefere?'))); return; }
@@ -322,7 +365,14 @@ app.post('/whatsapp', async (req, res) => {
     if (session.state === 'booked') { res.set('Content-Type','text/xml').send(twimlMessage(await humanize('Você já tem um agendamento confirmado. Para iniciar outro ou remarcar, envie “menu” ou escreva “remarcar”.'))); return; }
 
     // fallback
-    res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize('Desculpe, não entendi. Podemos tentar de novo?')));
+    {
+    const count = incConfused(session, phone);
+    let fb = 'Desculpe, não entendi. Podemos tentar de novo?';
+    if (count >= 2) fb += CLINIC_PHONE ? `
+Se preferir falar com um humano, nossa equipe atende pelo ${CLINIC_PHONE}.` : '
+Se preferir, posso te encaminhar para nossa equipe humana.';
+    res.set('Content-Type', 'text/xml').send(twimlMessage(await humanize(fb)));
+  }
   } catch (err) {
     logger.error({ err }, 'handler error');
     res.set('Content-Type', 'text/xml').send(twimlMessage('Tive um erro aqui do meu lado. Pode enviar "menu" para recomeçar?'));
